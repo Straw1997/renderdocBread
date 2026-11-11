@@ -3,4 +3,4 @@
 from .profiles import Profile, ProfileStore
 
 __all__ = ["Profile", "ProfileStore"]
-__version__ = "1.13.135"
+__version__ = "1.13.136"

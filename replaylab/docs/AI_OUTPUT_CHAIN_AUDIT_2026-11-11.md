@@ -150,10 +150,28 @@ python -m pytest @chainTests -ra --tb=short
 执行一次、ACP 旧进度失效，以及 Codex 终态快照的 phase 和大小边界。
 
 测试使用系统临时目录。本地化 `update_translations.ps1 -Check` 通过
-（5664 个活动条目，0 unfinished），`git diff --check` 通过；没有修改 UI
-源字符串。修改保留在本地任务分支，未提交、推送或打包，也没有更改任何
-现有应用安装或用户数据。真实供应商全量远端验证仍需对应测试账号和现场
-配置，当前证据不应描述成“所有供应商线上链路均已测试通过”。
+（合入当前主分支后为 5808 个活动条目，0 unfinished），`git diff --check`
+通过；没有修改 UI 源字符串。发行版本为 1.13.136，最终构建提交、完整
+回归和工件检查以发布回执记录为准。没有更改现有应用安装或用户数据。
+
+### 现有连接的线上检查
+
+2026-11-11 使用现有配置执行有界握手，以及一次无项目效果的真实模型/MCP
+工具往返。没有修改模型、凭据或登录状态。握手可用不等于模型生成有余额：
+
+| 连接 | 握手 | 模型调用、MCP 收据与最终正文 |
+| --- | --- | --- |
+| 自定义 OpenAI 兼容 API / gpt-6.1-sol | 通过 | 通过 |
+| Codex app-server / gpt-6.1-sol | 通过，账号有效 | 通过 |
+| Claude ACP / claude-sonnet-5 | 通过 | 供应商拒绝：403 Request not allowed |
+| 自定义 OpenAI 兼容 API / k3 | 通过 | 上游账号耗尽：403 All available accounts exhausted |
+| OpenAI API / gpt-6-astra | 通过 | 余额不足：429 credit_balance_exhausted |
+| Cursor ACP | 需要登录 | 未请求生成 |
+
+鉴权和余额错误不属于长度恢复，不能通过自动续作消除。其他厂商的协议路径
+经过本地真实 SDK/协议回归，不等于所有供应商账号均已完成线上生成测试。
+压缩质量以原任务引用、原历史存档、实际工具收据及最终交付内容检查共同约束，
+不能把摘要无格式错误描述为语义绝对无损。
 
 若后续仍在现场出现同样提示，收集错误附近的 `agent-core.log` 中
 `API output limit` 和 `continuing the same checkpoint` 记录，并结合当次

@@ -697,7 +697,7 @@ async def test_truncated_large_file_proposal_recovers_with_incremental_output(tm
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["proactive", "provider-overflow"])
+@pytest.mark.parametrize("mode", ["proactive", "provider-overflow", "empty-summary", "inflated-summary", "truncated-summary", "archive-failure", "media-archive-failure"])
 async def test_real_compaction_preserves_original_task_archives_and_completed_tool_effects(tmp_path, monkeypatch, mode):
     from langchain_core.outputs import ChatGeneration, ChatResult
     effects, histories = [], []
@@ -710,6 +710,14 @@ async def test_real_compaction_preserves_original_task_archives_and_completed_to
         return original_cleanup(run)
 
     monkeypatch.setattr("replaylab_agent.deep_engine._DeepRun._cleanup_workspace", cleanup)
+    if mode == "archive-failure":
+        async def fail_archive(*args, **kwargs):
+            return None
+        monkeypatch.setattr("deepagents.middleware.summarization.SummarizationMiddleware._aoffload_to_backend", fail_archive)
+    if mode == "media-archive-failure":
+        async def fail_media_archive(self, backend, messages):
+            return messages, 1
+        monkeypatch.setattr("deepagents.middleware.summarization.SummarizationMiddleware._aoffload_inline_media", fail_media_archive)
 
     class CompactionModel(ToolCallingFakeModel):
         summary_calls: int = 0
@@ -719,6 +727,13 @@ async def test_real_compaction_preserves_original_task_archives_and_completed_to
             metadata = getattr(run_manager, "metadata", {}) or {}
             if metadata.get("lc_source") == "summarization":
                 self.summary_calls += 1
+                if mode == "empty-summary":
+                    return ChatResult(generations=[ChatGeneration(message=AIMessage(content=""))])
+                if mode == "inflated-summary":
+                    return ChatResult(generations=[ChatGeneration(message=AIMessage(content="UNTRUSTED_INFLATION " * 10000))])
+                if mode == "truncated-summary":
+                    return ChatResult(generations=[ChatGeneration(message=AIMessage(content="UNTRUSTED_TRUNCATED_SUMMARY",
+                        response_metadata={"finish_reason": "length"}))])
                 return ChatResult(generations=[ChatGeneration(message=AIMessage(content=
                     "Private summary: prior events were observed; retain the task archive and inspect remaining events."))])
             if mode == "provider-overflow" and len(self.seen_messages) == 5 and not self.overflow_raised:
@@ -743,7 +758,12 @@ async def test_real_compaction_preserves_original_task_archives_and_completed_to
         deepagents_module=deepagents, model_factory=lambda *args: model, tool_session_factory=session)
     result = await engine.run(RunRequest(prompt="Inspect events 1 through 8. NEVER_APPLY_REPLAY; keep exact ResourceId::1011.",
         task_id="compaction-retains-task", instance_id="offline", profile=Profile(id="offline", preset="openai", model="offline",
-        model_context_windows={"offline": 65536} if mode == "proactive" else {})))
+        model_context_windows={"offline": 65536} if mode != "provider-overflow" else {})))
+    if mode in {"archive-failure", "media-archive-failure"}:
+        assert result.terminal_status == "failed"
+        assert ("recoverable original archive" if mode == "archive-failure" else "original media") in result.error
+        assert effects == list(range(1, len(effects) + 1)) and len(effects) < 8
+        return
     assert result.terminal_status == "completed", result.error
     assert result.text == "All eight events were inspected"
     assert effects == list(range(1, 9))
@@ -754,6 +774,10 @@ async def test_real_compaction_preserves_original_task_archives_and_completed_to
     assert "NEVER_APPLY_REPLAY" in final_system
     assert "ResourceId::1011" in final_system
     assert any(isinstance(item, ToolMessage) and item.tool_call_id == "event-8" for item in model.seen_messages[-1])
+    if mode in {"empty-summary", "inflated-summary", "truncated-summary"}:
+        final_input = json.dumps([item.content for item in model.seen_messages[-1]], ensure_ascii=False)
+        assert "Recovery required" in final_input
+        assert "UNTRUSTED_" not in final_input
     task_events = (tmp_path / "events/compaction-retains-task.jsonl").read_text(encoding="utf-8")
     assert "Private summary" not in task_events
 

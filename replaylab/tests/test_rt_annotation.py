@@ -164,7 +164,7 @@ def test_irregular_open_pen_loop_preserves_target_and_every_point_in_native_deli
         assert row['context']['resource']['resourceId'] == '1000000000000000801'
 
 
-def test_annotation_rules_reach_root_and_child_system_prompts_without_promoting_attachment_text(monkeypatch):
+def test_annotation_rules_reach_root_and_child_system_prompts_without_promoting_attachment_text(monkeypatch, tmp_path):
     from types import SimpleNamespace
     from replaylab_agent import deep_engine
     source = envelope().model_dump(by_alias=True)
@@ -178,6 +178,7 @@ def test_annotation_rules_reach_root_and_child_system_prompts_without_promoting_
     run.engine=SimpleNamespace(deepagents=lambda:SimpleNamespace(create_deep_agent=create), model=lambda _:None)
     run.config=SimpleNamespace(inherit_desktop_capabilities=False)
     run.catalog=None;run._checkpointer=None;run.user_mcp_tool_names=set()
+    run._input_archive=None;run._workspace_root=tmp_path
     run._filesystem_backend=lambda:None;run._workspace_guidance=lambda:'workspace'
     run._shader_file_middleware=lambda backend=None:None;run._tool_image_middleware=lambda:[]
     run.local_skill_tools=lambda:[];run.ask_user_tool=lambda:None;run.subagent_specs=lambda:[]

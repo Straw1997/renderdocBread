@@ -8,7 +8,7 @@
 | 项目 | 公开实现中的处理方式 | Bread 的采用方式 |
 | --- | --- | --- |
 | [DeepAgents](https://github.com/langchain-ai/deepagents/blob/main/libs/deepagents/deepagents/middleware/summarization.py) | 根据模型窗口、输出预留和完整请求计数压缩；原历史卸载到文件；输入被拒后只重试变小的请求 | 继续使用固定框架的摘要、工具结果卸载、检查点及溢出恢复；补上连接元数据和恢复边界 |
-| [Gemini CLI](https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/context/chatCompressionService.ts) | 保护近期工具结果；大结果落盘；检查压缩是否有效；避免反复失败的压缩 | 保留近期上下文与精确文件引用；使用框架的请求缩小检查，并保留空转检测 |
+| [Gemini CLI](https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/context/chatCompressionService.ts) | 保护近期工具结果；大结果落盘；拒绝空摘要和反而变长的压缩；避免反复失败的压缩 | 保留近期上下文与精确文件引用；拒绝空白、被截断及膨胀的摘要，回退到原历史分页恢复；保留请求缩小检查和空转检测 |
 | [Aider 的输出处理](https://github.com/Aider-AI/aider/blob/main/aider/coders/base_coder.py)、[历史摘要](https://github.com/Aider-AI/aider/blob/main/aider/history.py) | 识别长度终止；是否直接续接取决于模型能力；摘要旧历史并保留近期消息 | 使用同一任务检查点续作，提示分段文件输出；不假设所有接口支持 assistant prefill |
 
 [OpenAI 服务端压缩](https://developers.openai.com/api/docs/guides/compaction#server-side-compaction)
@@ -98,13 +98,17 @@ ACP 的压缩恢复遵循[命令声明协议](https://agentclientprotocol.com/pr
 
 ## 验证场景
 
-使用真实固定依赖和本地模型/协议模拟服务验证，未调用用户或对方的真实
-模型账号：
+使用真实固定依赖和本地模型/协议模拟服务验证，并补充已有连接的有界线上
+握手及模型/MCP 工具收据往返；具体账号状态见链路检查报告：
 
 - 同一连接中不同模型的窗口配置优先级，SDK 能力元数据和原配置保留。
 - 长首条输入中间的中文约束可通过实际工具找回。
 - 历史预压缩、Google SDK 形状的上下文错误恢复、摘要后原始任务仍可见。
 - 精确旧历史文件仍含早期证据；完成的八次工具操作没有被重复执行。
+- 摘要为空、被输出上限截断或比源历史更长时，不将它当作有效摘要；近期
+  消息与原始任务继续保留，模型收到精确原历史的强制回读说明。
+- 历史或媒体存档失败时，在替换上下文前报错，保留检查点，不继续宣称旧
+  证据可恢复。有效摘要也只是导航信息，不能代替用户原约束或 Host 工具收据。
 - OpenAI Chat / Responses / Anthropic 的真实 SSE 解析：空文本截断，以及
   工具参数截断后恢复，已完成的工具收据仍在后续请求内。
 - 主/子 Agent 的截断工具提案不会执行；正式文件通过有界的 write/edit
@@ -117,7 +121,8 @@ ACP 的压缩恢复遵循[命令声明协议](https://agentclientprotocol.com/pr
   工具输出回归一并检查。
 
 最终通过数量和命令记录在[链路检查报告](AI_OUTPUT_CHAIN_AUDIT_2026-11-11.md)。
-修改保持在本地未提交分支，未打包、发布或替换其他任务的应用安装。
+发行版本为 1.13.136；提交、构建及最终工件的对应关系由发布回执记录。
+构建与组包不替换其他任务的应用安装。
 
 ## 实际边界
 
