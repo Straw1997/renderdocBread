@@ -1,5 +1,16 @@
 """Task progress, rather than total turns, determines provider continuation."""
-from replaylab_agent.output_continuation import OutputContinuationLoop
+from replaylab_agent.output_continuation import OutputContinuationLoop, merge_answer_text
+
+
+def test_answer_continuation_preserves_mid_word_whitespace_and_exact_chinese_sections():
+    sections = ["第一节：Resource", "Id::1011\n\n第二节：法线", "纹理。\n第三节：保留全部结论。"]
+    answer = ""
+    for section in sections:
+        answer = merge_answer_text(answer, section)
+    assert answer == "第一节：ResourceId::1011\n\n第二节：法线纹理。\n第三节：保留全部结论。"
+    assert merge_answer_text(answer, "") == answer
+    assert merge_answer_text(answer, sections[-1]) == answer + sections[-1]
+    assert merge_answer_text(answer, answer + "\n完整复述的新结论。") == answer + "\n完整复述的新结论。"
 
 
 def test_distinct_work_can_span_many_empty_output_turns():

@@ -44,7 +44,7 @@ from .response_language import configured_interface_locale, infer_response_langu
 from .agent_diagnostics import configure_logging, get_logger, log_exception, public_error
 from .agent_contracts import OrchestratorConfig, RunRequest, RunResult
 from .agent_progress import ProgressReporter
-from .output_continuation import OutputContinuationLoop, continuation_prompt, task_work_fingerprint
+from .output_continuation import OutputContinuationLoop, continuation_prompt, task_work_fingerprint, merge_answer_text
 from .context_management import (TRUNCATED_TOOLS_KEY, TaskInputArchive, configure_model_context,
                                  context_middleware, input_budget, output_limit_reason)
 from .connectors.openai_compatibility import PROVIDER_RETRY_ATTEMPT
@@ -1438,8 +1438,9 @@ class _DeepRun:
             text = self.clarification.question
             status = "needs-user-input"
         else:
-            text = (self._final_text or "".join(self._main_text)
-                    or (self._limited_text if self._main_output_limited else "")).strip()
+            current_text = self._final_text or "".join(self._main_text)
+            text = ((self._limited_text or current_text)
+                    if self._main_output_limited else current_text).strip()
             reviewed_explanation = self._review_decision.reviewed_explanation() if not self._main_output_limited else ''
             if reviewed_explanation:
                 text = reviewed_explanation
@@ -1496,6 +1497,7 @@ class _DeepRun:
                 # add a follow-up to a checkpoint which could re-run an effect.
                 pending = bool(self._open_main_tools or self._active)
                 model_tools_pending = self._unfinished_model_tools
+                quarantined_proposal = False
                 get_state = getattr(agent, "aget_state", None)
                 if callable(get_state):
                     try:
@@ -1509,6 +1511,7 @@ class _DeepRun:
                             # The middleware stopped this proposal before any
                             # tool ran. It is safe to ask for smaller calls.
                             model_tools_pending = False
+                            quarantined_proposal = True
                         pending = pending or next_nodes is None or bool(next_nodes)
                     except Exception:
                         # Without a readable checkpoint it is unsafe to append
@@ -1520,7 +1523,8 @@ class _DeepRun:
                     pending = True
                 pending = pending or model_tools_pending
                 if self._main_output_limited:
-                    self._limited_text = (self._final_text or "".join(self._main_text)).strip() or self._limited_text
+                    if not quarantined_proposal:
+                        self._limited_text = merge_answer_text(self._limited_text, self._final_text or "".join(self._main_text))
                     if pending:
                         get_logger().warning("API output continuation deferred: unfinished work or unverified checkpoint")
                         break
@@ -1537,6 +1541,14 @@ class _DeepRun:
                     self._main_output_limited = False
                     continue
                 output_loop.normal_turn()
+                current_text = self._final_text or "".join(self._main_text)
+                if not current_text.strip() and self._limited_text:
+                    # An empty normal turn does not complete an earlier cut-off
+                    # answer. Retain its text as partial, without another loop.
+                    self._main_output_limited = True
+                    break
+                if current_text.strip() and self._limited_text:
+                    self._final_text = merge_answer_text(self._limited_text, current_text)
                 self._review_decision = self._review_loop.decide(
                     completion_review_state(self.receipt_store, self._activity_tracker), review_state(self.receipt_store))
                 if pending:
@@ -1546,6 +1558,7 @@ class _DeepRun:
                     break
                 emit_task_review(self.reporter, self._review_decision)
                 prompt = self._review_decision.continuation_prompt()
+                self._limited_text = ""
                 self._main_text.clear()
                 self._final_text = ""
         except asyncio.TimeoutError as exc:
@@ -1713,8 +1726,8 @@ class _DeepRun:
                         usage.get("output_tokens", "unknown"), output_details.get("reasoning", "unknown"),
                     )
                 if not self._unfinished_model_tools:
-                    text = _message_text(message).strip()
-                    if text:
+                    text = _message_text(message)
+                    if text.strip():
                         self._final_text = text
             return
 

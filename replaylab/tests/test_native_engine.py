@@ -504,7 +504,7 @@ async def test_acp_callbacks_reach_durable_activity_and_keep_text_streams_separa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("unfinished", [False, True])
-@pytest.mark.parametrize("empty_retry", [False, True])
+@pytest.mark.parametrize("empty_retry", [False, True, "empty-end"])
 @pytest.mark.parametrize("reason", ["max_tokens", "max_turn_requests"])
 async def test_acp_output_limit_is_partial_even_without_host_calls(tmp_path, monkeypatch, unfinished, empty_retry, reason) -> None:
     prompts = []
@@ -524,7 +524,8 @@ async def test_acp_output_limit_is_partial_even_without_host_calls(tmp_path, mon
             if unfinished:
                 kwargs["on_timeline"]({"activityId": "still-writing", "activityKind": "toolCall", "status": "running"})
             answer = "" if empty_retry and len(prompts) > 1 else "First half of answer"
-            return PromptResult(answer, [answer], reason, 0)
+            stop = "end_turn" if empty_retry == "empty-end" and len(prompts) > 1 else reason
+            return PromptResult(answer, [answer], stop, 0)
 
     monkeypatch.setattr("replaylab_agent.native_engine.build_native_mcp_route", lambda *args, **kwargs: None)
     engine = NativeAgentEngine(
@@ -544,7 +545,7 @@ async def test_acp_output_limit_is_partial_even_without_host_calls(tmp_path, mon
     assert "First half of answer" in result.text
     if reason == "max_tokens":
         assert "output limit" in result.text
-    assert len(prompts) == (1 if unfinished else 4)  # Only consecutive no-progress turns stop.
+    assert len(prompts) == (1 if unfinished else 2 if empty_retry == "empty-end" else 4)
 
 
 @pytest.mark.asyncio
@@ -612,7 +613,7 @@ async def test_acp_productive_task_spans_many_turn_limits(tmp_path, monkeypatch,
             if progress == "work":
                 effects.append(index)
                 store.record_task_activity("native-file-edit", f"saved-revision-{index}", occurrence_id=f"edit-{index}")
-            answer = f"New answer section {index}" if progress == "answer" else ""
+            answer = f"New answer section {index}\n" if progress == "answer" else ""
             return PromptResult(answer, [answer], reason, 1 if progress == "work" else 0)
 
     monkeypatch.setattr("replaylab_agent.native_engine.build_native_mcp_route", lambda *args, **kwargs: None)
@@ -624,7 +625,8 @@ async def test_acp_productive_task_spans_many_turn_limits(tmp_path, monkeypatch,
     finally:
         close_logging()
     assert result.terminal_status == "completed", result.error
-    assert result.text == "All five stages completed"
+    assert result.text == ("".join(f"New answer section {index}\n" for index in range(1, 6))
+                           if progress == "answer" else "") + "All five stages completed"
     assert len(prompts) == 6 and len(sessions) == 1
     assert effects == (list(range(1, 6)) if progress == "work" else [])
 
@@ -710,7 +712,7 @@ async def test_acp_output_limit_continues_same_session_without_restarting_tools(
         close_logging()
 
     assert result.terminal_status == "completed"
-    assert result.text == "The shader has been organized and saved."
+    assert result.text == "Saved the first edit.The shader has been organized and saved."
     assert len(sessions) == 1
     assert len(sessions[0].prompts) == 2
 

@@ -39,7 +39,7 @@ from .agent_contracts import OrchestratorConfig, RunRequest, RunResult
 from .agent_progress import ProgressReporter
 from .task_input import prepare_native_task_input, native_task_reference
 from .output_continuation import (ACP_TURN_LIMIT_REASONS, OutputContinuationLoop,
-                                  continuation_prompt, task_work_fingerprint)
+                                  continuation_prompt, task_work_fingerprint, merge_answer_text)
 from .agent_prompts import (
     main_agent_user_prompt,
     native_agent_system_prompt,
@@ -689,10 +689,16 @@ class NativeAgentEngine:
                     if result.tool_calls:
                         limited_text = ""
                     if result.stop_reason in ACP_TURN_LIMIT_REASONS:
-                        limited_text = result.final_text.strip() or limited_text
-                        if not result.final_text.strip() and limited_text and not unfinished_tools:
+                        limited_text = merge_answer_text(limited_text, result.final_text)
+                        if limited_text and not unfinished_tools:
                             result = replace(result, text=limited_text, segments=[limited_text])
                     else:
+                        if (not result.final_text.strip() and limited_text and not unfinished_tools
+                                and result.stop_reason == "end_turn"):
+                            return last_result, asked(last_result)
+                        if result.final_text.strip() and limited_text and result.stop_reason == "end_turn":
+                            answer = merge_answer_text(limited_text, result.final_text)
+                            result = replace(result, text=answer, segments=[answer])
                         limited_text = ""
                     last_result = result
                     sync_tool_receipts()

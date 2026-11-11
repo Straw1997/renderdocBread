@@ -10,6 +10,15 @@ from typing import Any
 ACP_TURN_LIMIT_REASONS = frozenset({"max_tokens", "max_turn_requests"})
 
 
+def merge_answer_text(previous: str, current: str) -> str:
+    """Keep exact continuation bytes, allowing a complete republished prefix."""
+    if not previous or current.startswith(previous):
+        return current
+    if not current:
+        return previous
+    return previous + current
+
+
 def task_work_fingerprint(store: Any) -> str:
     """Use distinct work facts, never call counters or timestamps, as progress."""
     try:
@@ -55,6 +64,9 @@ def continuation_prompt(stop_reason: str) -> str:
              else "the provider's per-response output limit")
     return (
         "The previous turn stopped at " + cause + ". This is a request boundary, not task completion. "
+        "Answer text since the last tool boundary is retained: continue its exact text without repeating it, "
+        "including any needed leading whitespace. If further tools change the work state, provide a new "
+        "self-contained conclusion after those tools. "
         "Continue the existing request from this session's current state; do not restart, reread unchanged "
         "Skills, or repeat completed tools. Split remaining work into smaller independently useful steps "
         "and bounded tool calls instead of emitting one oversized response or tool argument. "

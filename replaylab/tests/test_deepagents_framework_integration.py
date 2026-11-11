@@ -44,7 +44,7 @@ async def test_real_sdk_internal_model_metadata_survives_event_stream():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("exhausted", [False, True])
+@pytest.mark.parametrize("exhausted", [False, True, "empty-end"])
 async def test_api_responses_stream_failure_after_tool_preserves_completed_work(tmp_path, monkeypatch, exhausted):
     import httpx
     from langchain_openai import ChatOpenAI
@@ -323,8 +323,9 @@ async def test_api_output_limit_continues_checkpoint_without_replaying_effects(
     # allowance before starting the answer. Later retries may also be empty.
     def limited(content):
         return AIMessage(content=content, response_metadata=metadata)
-    responses = [_message("inspect_event", {"event_id": 42}, "saved-once"), limited("First partial answer")]
-    responses += ([limited("") for _ in range(3)] if exhausted else [AIMessage(content="Verified final answer")])
+    responses = [_message("inspect_event", {"event_id": 42}, "saved-once"), limited("First partial answer\n\n")]
+    responses += ([AIMessage(content="")] if exhausted == "empty-end" else
+                  [limited("") for _ in range(3)] if exhausted else [AIMessage(content="Verified final answer")])
     model = ToolCallingFakeModel(responses=responses)
     engine = DeepAgentsEngine(catalog=_catalog(tmp_path),
         config=OrchestratorConfig(event_root=tmp_path / "events", workspace_base=tmp_path / "turns", log_root=tmp_path / "logs"),
@@ -333,11 +334,11 @@ async def test_api_output_limit_continues_checkpoint_without_replaying_effects(
         instance_id="offline", profile=Profile(id="offline", preset="openai", model="offline")))
 
     assert effects == [42], result.error
-    assert len(model.seen_messages) == (5 if exhausted else 3)
+    assert len(model.seen_messages) == (5 if exhausted is True else 3)
     messages = model.seen_messages[-1]
     assert len([item for item in messages if isinstance(item, ToolMessage) and item.tool_call_id == "saved-once"]) == 1
     user_messages = [item for item in messages if isinstance(item, HumanMessage)]
-    assert len(user_messages) == (4 if exhausted else 2)
+    assert len(user_messages) == (4 if exhausted is True else 2)
     assert "do not restart" in user_messages[-1].content
     if exhausted:
         assert result.terminal_status == "partial"
@@ -345,7 +346,7 @@ async def test_api_output_limit_continues_checkpoint_without_replaying_effects(
         assert "output limit" in result.text
     else:
         assert result.terminal_status == "completed", result.error
-        assert result.text == "Verified final answer"
+        assert result.text == "First partial answer\n\nVerified final answer"
 
 
 @pytest.mark.asyncio
@@ -369,7 +370,7 @@ async def test_api_productive_task_spans_more_than_two_output_continuations(tmp_
     for index in range(5):
         if progress == "work":
             responses.append(_message("inspect_event", {"event_id": index + 1}, f"unique-{index}"))
-        responses.append(AIMessage(content=f"Answer section {index}" if progress == "answer" else "",
+        responses.append(AIMessage(content=f"Answer section {index}\n" if progress == "answer" else "",
                                    response_metadata={"finish_reason": "length"}))
     responses.append(AIMessage(content="All five sections completed"))
     model = ToolCallingFakeModel(responses=responses)
@@ -379,7 +380,8 @@ async def test_api_productive_task_spans_more_than_two_output_continuations(tmp_
     result = await engine.run(RunRequest(prompt="Inspect events 1 through 5", task_id="long-productive-output",
         instance_id="offline", profile=Profile(id="offline", preset="openai", model="offline")))
     assert result.terminal_status == "completed", result.error
-    assert result.text == "All five sections completed"
+    assert result.text == ("".join(f"Answer section {index}\n" for index in range(5))
+                           if progress == "answer" else "") + "All five sections completed"
     assert len(model.seen_messages) == (11 if progress == "work" else 6)
     assert effects == (list(range(1, 6)) if progress == "work" else [])
     assert len([item for item in model.seen_messages[-1] if isinstance(item, HumanMessage)]) == 6
