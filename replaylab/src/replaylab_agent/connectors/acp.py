@@ -159,16 +159,56 @@ def _split_provider_incident(text: str) -> tuple[str, _ProviderIncident | None]:
     return ("", incident) if incident is not None else (text, None)
 
 
+def _acp_context_request_failure(error: BaseException) -> ProviderRequestError | None:
+    """Accept explicit context errors from RPC failures, never assistant text."""
+    try:
+        from acp.exceptions import RequestError
+    except ImportError:
+        return None
+    current, seen = error, set()
+    for _ in range(6):
+        if current is None or id(current) in seen:
+            return None
+        seen.add(id(current))
+        if isinstance(current, RequestError) and current.code in {-32603, -32000}:
+            data = current.data if isinstance(current.data, Mapping) else {}
+            nested = data.get("error") if isinstance(data.get("error"), Mapping) else {}
+            rendered = str(current)[:4096]
+            http = re.search(r"\bAPI Error:\s*([45][0-9]{2})\b", rendered)
+            status = int(http.group(1)) if http else nested.get("status", data.get("status"))
+            if status is not None and status not in {400, 413, 422}:
+                return None
+            kinds = {str(data.get(key) or "").lower() for key in ("errorKind", "code")}
+            kinds.add(str(nested.get("code") or "").lower())
+            explicit = bool(kinds & {"context_length_exceeded", "context_window_exceeded",
+                                    "context_limit_exceeded", "prompt_too_long"})
+            if not explicit and http:
+                from ..context_management import is_context_size_error
+                proxy_error = RuntimeError(rendered)
+                proxy_error.status_code = status
+                explicit = is_context_size_error(proxy_error)
+            if explicit:
+                return ProviderRequestError("The provider rejected input exceeding its context window.",
+                                            error_code="provider-context")
+        current = current.__cause__ or current.__context__
+    return None
+
+
 def _acp_provider_request_failure(
     error: BaseException, *, provider_id: str,
 ) -> ProviderRequestError | None:
-    """Preserve Claude's typed ACP failures before generic connector wrapping.
+    """Preserve context failures and Claude's typed errors before wrapping.
 
     The adapter forwards SDKAssistantMessage.error as RequestError.data.errorKind.
     Older releases only embed a vendor HTTP failure in that same RPC error.
     Assistant chunks, tool results and stderr are deliberately never inspected.
     """
-    if provider_id != "claude-code-acp" or isinstance(error, ProviderRequestError):
+    if isinstance(error, ProviderRequestError):
+        return None
+    context_failure = _acp_context_request_failure(error)
+    if context_failure is not None:
+        return context_failure
+    if provider_id != "claude-code-acp":
         return None
     try:
         from acp.exceptions import RequestError
@@ -1263,6 +1303,7 @@ class _ACPClientState:
     tool_input_identities: dict[str, str] = field(default_factory=dict)
     plan_activity_ids: dict[str, str] = field(default_factory=dict)
     plan_statuses: dict[str, str] = field(default_factory=dict)
+    available_commands: frozenset[str] = frozenset()
 
 
 def _provider_incident_from_exception(
@@ -1510,6 +1551,14 @@ def _make_client(sdk: _ACPSDK, state: _ACPClientState) -> Any:
             if state.session_id and session_id != state.session_id:
                 return
             update_kind = _update_kind(update)
+            if update_kind == "available_commands_update":
+                commands = _field(update, "available_commands", "availableCommands")
+                if isinstance(commands, (list, tuple)):
+                    state.available_commands = frozenset(
+                        name for item in commands[:128]
+                        if isinstance(name := _field(item, "name"), str) and 0 < len(name) <= 128
+                    )
+                return
             if update_kind in _ACP_PROVIDER_ERROR_UPDATE_KINDS:
                 incident = _classify_provider_incident(
                     _extract_provider_error_text(update), explicit_error=True
@@ -1922,6 +1971,7 @@ def _update_kind(update: Any) -> str:
     return {
         "AgentMessageChunk": "agent_message_chunk",
         "AgentThoughtChunk": "agent_thought_chunk",
+        "AvailableCommandsUpdate": "available_commands_update",
         "AgentPlanUpdate": "plan",
         "AgentPlanContentUpdate": "plan_update",
         "AgentPlanRemovedUpdate": "plan_removed",

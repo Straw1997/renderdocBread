@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .catalog import BREAD_MCP_SERVER_NAME
+from .output_continuation import ACP_TURN_LIMIT_REASONS
 from .connectors.acp import (
     _ACPClientState,
     _ACP_TRANSPORT_SHUTDOWN_TIMEOUT,
@@ -441,6 +442,15 @@ class ACPMainAgentSession:
         )
 
     # ---------------------------------------------------------------- prompt
+    async def compact_context(self) -> bool:
+        """Use a provider-advertised command; never guess a vendor extension."""
+        if self._state is None or "compact" not in self._state.available_commands:
+            return False
+        result = await self.prompt("/compact")
+        # Maintenance output is not an assistant answer. A compaction command
+        # which starts tools is not proof of a settled, reusable context.
+        return result.stop_reason == "end_turn" and result.tool_calls == 0
+
     async def prompt(
         self,
         text: str,
@@ -550,7 +560,7 @@ class ACPMainAgentSession:
         if state.provider_incident is not None:
             raise _provider_incident_error(state)
         stop_reason = _stop_reason(response)
-        if stop_reason not in {"end_turn", "max_tokens"}:
+        if stop_reason not in {"end_turn", *ACP_TURN_LIMIT_REASONS}:
             raise ConnectorError(f"ACP Agent stopped without completing the turn: {stop_reason}")
         return PromptResult(
             text="".join(state.text_chunks),

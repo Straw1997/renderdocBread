@@ -19,6 +19,23 @@ FIXTURE = Path(__file__).parent / "fixtures/fake_codex_app_server.py"
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["final_answer", "commentary", "analysis", "oversized"])
+async def test_terminal_snapshot_preserves_only_explicit_bounded_final_answer(tmp_path, phase):
+    connector = CodexAppServerConnector(
+        [sys.executable, str(FIXTURE), "snapshot-" + phase], cwd=tmp_path, timeout=10,
+    )
+    try:
+        if phase == "oversized":
+            with pytest.raises(ConnectorError, match="external Agent response exceeded"):
+                await connector.run("explain")
+        else:
+            result = await connector.run("explain")
+            assert result.text == ("Snapshot answer" if phase == "final_answer" else "")
+    finally:
+        await connector.close()
+
+
+@pytest.mark.asyncio
 async def test_real_stdio_large_tool_arguments_and_media_do_not_end_turn(tmp_path):
     timeline = []
     connector = CodexAppServerConnector(

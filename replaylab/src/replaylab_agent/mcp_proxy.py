@@ -94,6 +94,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--disabled-skill", action="append", default=[])
     parser.add_argument("--mcp-server-json", default="")
     parser.add_argument("--mcp-server-file", type=Path)
+    parser.add_argument("--task-input-file", type=Path)
     return parser
 
 
@@ -559,6 +560,7 @@ async def serve_filtered_proxy(
     host_env: dict[str, str],
     gateway: SkillGateway | None = None,
     external_servers: Sequence[dict[str, Any]] = (),
+    task_input: str | None = None,
 ) -> None:
     try:
         from mcp import ClientSession
@@ -576,6 +578,8 @@ async def serve_filtered_proxy(
     async with AsyncExitStack() as stack:
         output_store = OwnedOutputStore()
         stack.callback(output_store.close)
+        if task_input is not None:
+            output_store.admit_task_input(task_input)
         async with _proxy_connections(stack, host, host_args, host_env, external_servers) as (upstream, external):
             listing = await upstream.list_tools() if upstream is not None else None
             upstream_by_name = {
@@ -601,7 +605,7 @@ async def serve_filtered_proxy(
             if not host_reader_granted:
                 upstream_by_name[OWNED_OUTPUT_READER] = _Tool(
                     name=OWNED_OUTPUT_READER,
-                    description="Page this run's exact retained tool result by path and UTF-8 byte offset. Other files require a granted Host reader.",
+                    description="Page this run's exact retained task input or tool result by path and UTF-8 byte offset. Other files require a granted Host reader.",
                     inputSchema=owned_output_reader_schema(),
                 )
             if availability:
@@ -893,6 +897,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         args = _parser().parse_args(_expand_route_file(sys.argv[1:] if argv is None else argv))
         host, host_args, allowed, effects, scope, host_env = _validate_configuration(args)
         gateway = _skill_gateway(args, allowed=allowed, effects=effects)
+        from .task_input import load_task_input
+        task_input = load_task_input(args.task_input_file) if args.task_input_file is not None else None
         asyncio.run(
             serve_filtered_proxy(
                 host,
@@ -903,6 +909,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 host_env=host_env,
                 gateway=gateway,
                 external_servers=_configured_mcp_servers(args),
+                task_input=task_input,
             )
         )
         return 0

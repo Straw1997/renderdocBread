@@ -179,15 +179,43 @@ These local copies are not automatic workspace imports or replay authority.
 
 Progress before the last tool is not a final answer. Empty conclusions,
 transport interruption and explicit provider output truncation are reported
-as incomplete outcomes. ACP can continue an explicit `max_tokens` stop in the
-same session at most twice. API uses a per-run checkpoint for Shader review
+as incomplete outcomes. ACP continues explicit `max_tokens` and
+`max_turn_requests` stops in the same session; API continues explicit provider
+output limits using its current checkpoint when no graph nodes or tools are
+pending. Neither path imposes a total output-continuation count while new work
+facts or new answer text arrive. Three consecutive limited turns without either
+stop as partial rather than spending indefinitely on repeated or empty output.
+Tool counters, timestamps and copied fallback answers do not count as progress.
+Both paths preserve partial text across empty retries until a new tool boundary.
+Continuation guidance asks the Agent to split work and tool arguments into
+bounded steps and save large deliverables incrementally. Completed tools are
+not replayed, and configured output caps remain unchanged.
+API also uses that checkpoint for Shader review
 continuations and appends only the continuation message; it never resends the
-original task or reruns completed tool calls. API truncation remains an explicit
-partial outcome. The [October execution audit](AI_EXECUTION_AUDIT_2026-10-12.md)
+original task or reruns completed tool calls. Stalled or unsafe-to-resume API
+truncation remains an explicit partial outcome. Codex accepts an explicit
+`final_answer` from a completed turn snapshot if the provider omitted the separate
+item event; commentary and reasoning are never fallback answers. The
+[November output audit](AI_OUTPUT_CHAIN_AUDIT_2026-11-11.md) records the coverage
+and remaining live-provider limits. The [October execution audit](AI_EXECUTION_AUDIT_2026-10-12.md)
 records the observed premature conclusion, permission limits and performance
 fixes, including targeted GIL release around native replay, Shader inspection,
 compilation, readback and replacement calls. Checked replacement/removal can
 replay internally, so wrapping only the public `SetFrameEvent` entry is insufficient.
+
+The [length recovery design](AI_LENGTH_RECOVERY_DESIGN_2026-11-11.md) records the
+open-source comparison and input-side implementation. API model-window metadata
+now drives the running compactor, with output reservation, conservative complete
+request counting and a bounded summary input. The original task remains pinned
+as quoted user data with an exact archive reference. Oversized initial text is
+archived before the first call. Native ACP/Codex can page equivalent task-bound
+input through `read_evidence_file` without gaining ambient filesystem access.
+Explicit provider context errors recover inside the existing model call; ACP
+uses `/compact` only when the current session advertised it. Maintenance text
+never becomes an answer. Truncated API tool proposals are quarantined before
+execution, including parsed partial JSON. Root checkpoints record them as
+unexecuted and may continue with bounded calls; children return that fact to the
+parent. Actual pending tools still prohibit unsafe continuation.
 
 `decompile_shader_workspace(reference_only=true)` can reconstruct the immutable
 captured baseline into an independent reference even when working source already

@@ -498,7 +498,9 @@ async def test_acp_callbacks_reach_durable_activity_and_keep_text_streams_separa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("unfinished", [False, True])
-async def test_acp_output_limit_is_partial_even_without_host_calls(tmp_path, monkeypatch, unfinished) -> None:
+@pytest.mark.parametrize("empty_retry", [False, True])
+@pytest.mark.parametrize("reason", ["max_tokens", "max_turn_requests"])
+async def test_acp_output_limit_is_partial_even_without_host_calls(tmp_path, monkeypatch, unfinished, empty_retry, reason) -> None:
     prompts = []
 
     class FakeSession:
@@ -515,7 +517,8 @@ async def test_acp_output_limit_is_partial_even_without_host_calls(tmp_path, mon
             prompts.append(text)
             if unfinished:
                 kwargs["on_timeline"]({"activityId": "still-writing", "activityKind": "toolCall", "status": "running"})
-            return PromptResult("First half of answer", ["First half of answer"], "max_tokens", 0)
+            answer = "" if empty_retry and len(prompts) > 1 else "First half of answer"
+            return PromptResult(answer, [answer], reason, 0)
 
     monkeypatch.setattr("replaylab_agent.native_engine.build_native_mcp_route", lambda *args, **kwargs: None)
     engine = NativeAgentEngine(
@@ -533,8 +536,135 @@ async def test_acp_output_limit_is_partial_even_without_host_calls(tmp_path, mon
 
     assert result.terminal_status == "partial"
     assert "First half of answer" in result.text
-    assert "output limit" in result.text
-    assert len(prompts) == (1 if unfinished else 3)  # No concurrent effects or infinite loop.
+    if reason == "max_tokens":
+        assert "output limit" in result.text
+    assert len(prompts) == (1 if unfinished else 4)  # Only consecutive no-progress turns stop.
+
+
+@pytest.mark.asyncio
+async def test_acp_new_tool_invalidates_truncated_answer_fallback(tmp_path, monkeypatch) -> None:
+    prompts = []
+
+    class Session:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def prompt(self, text, **kwargs):
+            prompts.append(text)
+            if len(prompts) == 1:
+                return PromptResult("Pre-tool progress", ["Pre-tool progress"], "max_tokens", 0)
+            if len(prompts) == 2:
+                for status in ("running", "completed"):
+                    kwargs["on_timeline"]({"activityId": "new-tool", "activityKind": "toolCall", "status": status})
+            return PromptResult("", [""], "max_tokens", 1 if len(prompts) == 2 else 0)
+
+    monkeypatch.setattr("replaylab_agent.native_engine.build_native_mcp_route", lambda *args, **kwargs: None)
+    engine = NativeAgentEngine(catalog=_catalog(tmp_path),
+        config=OrchestratorConfig(event_root=tmp_path / "events", log_root=tmp_path / "logs", workspace_base=tmp_path / "turns"),
+        acp_session_factory=Session)
+    try:
+        result = await engine.run(RunRequest(prompt="Inspect event 42", profile=_profile(), task_id="acp-tool-boundary"))
+    finally:
+        close_logging()
+    assert result.terminal_status == "partial"
+    assert "Pre-tool progress" not in result.text
+    assert len(prompts) == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["max_tokens", "max_turn_requests"])
+@pytest.mark.parametrize("progress", ["answer", "work"])
+async def test_acp_productive_task_spans_many_turn_limits(tmp_path, monkeypatch, reason, progress) -> None:
+    prompts, sessions, effects = [], [], []
+    store = TaskReportStore("acp-productive-limits", tmp_path / "events")
+
+    class Session:
+        def __init__(self, **kwargs):
+            sessions.append(self)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def prompt(self, text, **kwargs):
+            prompts.append(text)
+            index = len(prompts)
+            if index == 6:
+                return PromptResult("All five stages completed", ["All five stages completed"], "end_turn", 0)
+            if index > 1:
+                assert "do not restart" in text
+                assert "smaller independently useful steps" in text
+                assert kwargs["attachments"] == ()
+            if progress == "work":
+                effects.append(index)
+                store.record_task_activity("native-file-edit", f"saved-revision-{index}", occurrence_id=f"edit-{index}")
+            answer = f"New answer section {index}" if progress == "answer" else ""
+            return PromptResult(answer, [answer], reason, 1 if progress == "work" else 0)
+
+    monkeypatch.setattr("replaylab_agent.native_engine.build_native_mcp_route", lambda *args, **kwargs: None)
+    engine = NativeAgentEngine(catalog=_catalog(tmp_path),
+        config=OrchestratorConfig(event_root=tmp_path / "events", log_root=tmp_path / "logs", workspace_base=tmp_path / "turns"),
+        acp_session_factory=Session)
+    try:
+        result = await engine.run(RunRequest(prompt="Complete five stages", profile=_profile(), task_id="acp-productive-limits"))
+    finally:
+        close_logging()
+    assert result.terminal_status == "completed", result.error
+    assert result.text == "All five stages completed"
+    assert len(prompts) == 6 and len(sessions) == 1
+    assert effects == (list(range(1, 6)) if progress == "work" else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["recover", "unsupported", "still-too-large", "authentication"])
+async def test_acp_context_overflow_uses_supported_compaction_without_restarting_task(tmp_path, monkeypatch, failure):
+    from replaylab_agent.errors import ProviderRequestError
+    prompts, sessions, compact_calls = [], [], []
+
+    class Session:
+        def __init__(self, **kwargs):
+            sessions.append(self)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def compact_context(self):
+            compact_calls.append(True)
+            return failure != "unsupported"
+
+        async def prompt(self, text, **kwargs):
+            prompts.append(text)
+            if len(prompts) == 1 or failure == "still-too-large":
+                raise ProviderRequestError("Input did not fit", error_code=
+                    "provider-authentication" if failure == "authentication" else "provider-context")
+            assert "do not restart" not in text or "repeat completed" in text
+            assert "Do not restart the task" in text
+            assert "ORIGINAL_TASK_MARKER" not in text
+            return PromptResult("Completed after context recovery", ["Completed after context recovery"], "end_turn", 0)
+
+    monkeypatch.setattr("replaylab_agent.native_engine.build_native_mcp_route", lambda *args, **kwargs: None)
+    engine = NativeAgentEngine(catalog=_catalog(tmp_path),
+        config=OrchestratorConfig(event_root=tmp_path / "events", log_root=tmp_path / "logs", workspace_base=tmp_path / "turns"),
+        acp_session_factory=Session)
+    try:
+        result = await engine.run(RunRequest(prompt="ORIGINAL_TASK_MARKER", profile=_profile(), task_id="acp-input-limit"))
+    finally:
+        close_logging()
+    assert len(sessions) == 1
+    assert len(compact_calls) == (0 if failure == "authentication" else 1)
+    assert len(prompts) == (2 if failure in {"recover", "still-too-large"} else 1)
+    assert result.terminal_status == ("completed" if failure == "recover" else "failed")
 
 
 @pytest.mark.asyncio

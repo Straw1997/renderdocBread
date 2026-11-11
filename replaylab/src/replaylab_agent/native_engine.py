@@ -27,7 +27,7 @@ from .conversation import (
     parse_conversation_prompt,
 )
 from .catalog import BREAD_MCP_SERVER_NAME
-from .errors import ConfigurationError, ConnectorError, ProviderIncidentError
+from .errors import ConfigurationError, ConnectorError, ProviderIncidentError, ProviderRequestError
 from .events import TaskEventWriter
 from .response_language import configured_interface_locale, infer_response_language
 from . import native_vendor as vendor
@@ -37,6 +37,9 @@ from .native_mcp import NativeMCPRoute, build_native_mcp_route, native_codex_arg
 from .policy import ordered_tool_names
 from .agent_contracts import OrchestratorConfig, RunRequest, RunResult
 from .agent_progress import ProgressReporter
+from .task_input import prepare_native_task_input, native_task_reference
+from .output_continuation import (ACP_TURN_LIMIT_REASONS, OutputContinuationLoop,
+                                  continuation_prompt, task_work_fingerprint)
 from .agent_prompts import (
     main_agent_user_prompt,
     native_agent_system_prompt,
@@ -57,7 +60,6 @@ _QUESTION_BLOCK_RE = re.compile(
 )
 _QUESTION_OPTION_RE = re.compile(r"^\s*([1-6])[.)]\s+(.+?)\s*$")
 _ACP_TRANSPORT_RETRY_LIMIT = 2
-_ACP_OUTPUT_CONTINUATION_LIMIT = 2
 _DURABLE_RECEIPT_SETTLE_SECONDS = 2.0
 _DURABLE_RECEIPT_POLL_SECONDS = 0.1
 
@@ -287,6 +289,7 @@ class NativeAgentEngine:
                     request.intent, request.context
                 ),
             )
+            user_prompt, route = prepare_native_task_input(user_prompt, route, profile=profile, model=context.model)
             first_prompt = system_prompt + "\n\n" + user_prompt
             if self.config.inherit_desktop_capabilities:
                 from .desktop_capabilities import capability_guidance
@@ -379,6 +382,9 @@ class NativeAgentEngine:
         provider_output_limited = bool(
             protocol == "acp" and getattr(result, "stop_reason", "") == "max_tokens"
         )
+        provider_turn_limited = bool(
+            protocol == "acp" and getattr(result, "stop_reason", "") in ACP_TURN_LIMIT_REASONS
+        )
         if clarification is not None:
             # The block itself is markup the user must never read, but whatever the
             # Agent said around it may be a real partial result. Keep that and fall
@@ -389,7 +395,7 @@ class NativeAgentEngine:
             status = "needs-user-input"
         else:
             reviewed_explanation = (review_decision.reviewed_explanation()
-                                    if not provider_interrupted and not provider_output_limited else '')
+                                    if not provider_interrupted and not provider_turn_limited else '')
             if reviewed_explanation:
                 text = reviewed_explanation
             missing_answer = not text
@@ -419,11 +425,13 @@ class NativeAgentEngine:
                     else "The model reached this turn's output limit; its answer may be truncated. Completed edits remain saved."
                 )
                 text = (text + "\n\n" + limit_note).strip()
+            elif provider_turn_limited:
+                status = "partial"
             elif missing_answer:
                 status = "partial" if worked else "failed"
             else:
                 status = "completed"
-            if review_decision.action == "partial" and not provider_interrupted and not provider_output_limited:
+            if review_decision.action == "partial" and not provider_interrupted and not provider_turn_limited:
                 status = "partial"
                 text = review_decision.incomplete_text(language, text)
             elif review_decision.action == "accept" and status == "completed" and not reviewed_explanation:
@@ -583,10 +591,12 @@ class NativeAgentEngine:
                 str(getattr(answer, "final_text", getattr(answer, "text", "")) or "")))
 
         transport_retries = 0
-        output_continuations = 0
+        output_loop = OutputContinuationLoop(task_work_fingerprint(activity_tracker.store))
         prompt = first_prompt
         prompt_attachments = attachments
         last_result = PromptResult("", [""], "provider_pending", 0)
+        limited_text = ""
+        compacted_work: set[str] = set()
 
         while True:
             restart_transport = False
@@ -603,6 +613,25 @@ class NativeAgentEngine:
                             unfinished_tools=unfinished_tools,
                             activity_tracker=activity_tracker,
                         )
+                    except ProviderRequestError as error:
+                        compact = getattr(session, "compact_context", None)
+                        fingerprint = task_work_fingerprint(activity_tracker.store)
+                        if (error.error_code != "provider-context" or unfinished_tools or not callable(compact)
+                                or fingerprint in compacted_work):
+                            raise
+                        compacted_work.add(fingerprint)
+                        if not await compact():
+                            raise
+                        sync_tool_receipts()
+                        get_logger().info("ACP input window recovered using the advertised compact command")
+                        prompt = (
+                            "The provider rejected an oversized input and its context has now been compacted. "
+                            "Continue the existing task from retained state with smaller reads and bounded tool calls. "
+                            "Do not restart the task or repeat completed effects. Recover exact data from retained "
+                            "files and receipts; preserve the original user constraints."
+                        ) + native_task_reference(route)
+                        prompt_attachments = ()
+                        continue
                     except ProviderIncidentError as incident:
                         await self._reconcile_durable_host_state(
                             sync_tool_receipts,
@@ -652,38 +681,50 @@ class NativeAgentEngine:
                         break
 
                     prompt_attachments = ()
+                    current_answer = result.final_text
+                    # A later reasoning-only truncation must not erase the last
+                    # displayable partial answer. A new tool boundary invalidates
+                    # that fallback: pre-tool progress is never a conclusion.
+                    if result.tool_calls:
+                        limited_text = ""
+                    if result.stop_reason in ACP_TURN_LIMIT_REASONS:
+                        limited_text = result.final_text.strip() or limited_text
+                        if not result.final_text.strip() and limited_text and not unfinished_tools:
+                            result = replace(result, text=limited_text, segments=[limited_text])
+                    else:
+                        limited_text = ""
                     last_result = result
                     sync_tool_receipts()
                     question = asked(result)
-                    if (
-                        result.stop_reason == "max_tokens"
-                        and question is None
-                        and not unfinished_tools
-                        and output_continuations < _ACP_OUTPUT_CONTINUATION_LIMIT
-                    ):
+                    if result.stop_reason in ACP_TURN_LIMIT_REASONS and question is None and not unfinished_tools:
                         # This is an explicit protocol truncation, not a Host
                         # judgement about whether the Agent's work is good enough.
                         # Keep the same session and receipts so completed effects
                         # and Skill reads are not repeated on a fresh transcript.
-                        output_continuations += 1
+                        # Judge the actual new answer, not a fallback copied from
+                        # an older turn; replayed text is not forward progress.
+                        if not output_loop.should_continue(
+                            current_answer, task_work_fingerprint(activity_tracker.store),
+                        ):
+                            get_logger().warning("ACP turn continuation stalled: reason=%s noProgressTurns=%d",
+                                                 result.stop_reason, output_loop.no_progress_turns)
+                            return result, question
                         get_logger().info(
-                            "ACP output truncated; continuing the same session (%d/%d)",
-                            output_continuations, _ACP_OUTPUT_CONTINUATION_LIMIT,
+                            "ACP turn limited; continuing the same session (reason=%s continuation=%d stalled=%d)",
+                            result.stop_reason, output_loop.continuations, output_loop.no_progress_turns,
                         )
-                        prompt = (
-                            "Your previous response was cut off by the provider's output limit. "
-                            "Continue the existing request from this session's current state; "
-                            "do not restart, reread unchanged Skills, or repeat completed tools. "
-                            "Complete any remaining work and provide a self-contained final answer. "
-                            "If work cannot be completed, state what remains and the concrete reason."
-                        )
+                        prompt = continuation_prompt(result.stop_reason) + native_task_reference(route)
                         continue
                     if result.stop_reason == "end_turn" and question is None:
+                        output_loop.normal_turn()
                         decision = check_self_review(bool(unfinished_tools))
                         if decision.action == "continue":
                             emit_task_review(reporter, decision)
-                            prompt = decision.continuation_prompt()
+                            prompt = decision.continuation_prompt() + native_task_reference(route)
                             continue
+                    if result.stop_reason in ACP_TURN_LIMIT_REASONS and unfinished_tools:
+                        get_logger().warning("ACP turn continuation deferred: reason=%s unfinishedTools=%d",
+                                             result.stop_reason, len(unfinished_tools))
                     return result, question
             if restart_transport:
                 continue
@@ -889,7 +930,7 @@ class NativeAgentEngine:
                 if decision.action != "continue":
                     break
                 emit_task_review(reporter, decision)
-                prompt = decision.continuation_prompt()
+                prompt = decision.continuation_prompt() + native_task_reference(route)
                 first_turn = False
         finally:
             with contextlib.suppress(Exception):

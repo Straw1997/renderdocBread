@@ -47,6 +47,17 @@ class OwnedOutputStore:
     def __init__(self) -> None:
         self.root = _tool_output_root() / ("run-" + uuid.uuid4().hex)
         self._files: dict[str, dict[str, Any]] = {}
+        self._aliases: dict[str, str] = {}
+
+    def admit_task_input(self, text: str) -> None:
+        from .task_input import TASK_INPUT_URI
+        # Admission occurs once before tools start; keep original user text in
+        # a private run directory on POSIX as well as the per-user Windows temp.
+        self.root.mkdir(parents=True, mode=0o700, exist_ok=False)
+        data = text.encode("utf-8")
+        path = self.write(data, hashlib.sha256(data).hexdigest(), is_json=False,
+                          tool=OWNED_OUTPUT_READER, authority="task-user-input")
+        self._aliases[TASK_INPUT_URI] = str(path)
 
     def write(self, data: bytes, digest: str, *, is_json: bool,
               tool: str, authority: str) -> Path:
@@ -67,6 +78,7 @@ class OwnedOutputStore:
         except OSError:
             pass
         self._files.clear()
+        self._aliases.clear()
 
     def owns(self, path: str) -> bool:
         return isinstance(path, str) and str(Path(path).absolute()) in self._files
@@ -74,6 +86,8 @@ class OwnedOutputStore:
     def read(self, arguments: Mapping[str, Any]) -> dict[str, Any] | None:
         """Return a local page, or None for an unrelated Host-owned path."""
         value = arguments.get("path")
+        if isinstance(value, str) and value in self._aliases:
+            value = self._aliases[value]
         if not isinstance(value, str) or not value or "\0" in value:
             return None
         target = Path(value).absolute()
