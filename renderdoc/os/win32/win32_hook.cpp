@@ -192,7 +192,6 @@ struct CachedHookData
   std::map<rdcstr, DllHookset> DllHooks;
   HMODULE ownmodule = NULL;
   Threading::CriticalSection lock;
-  char lowername[512] = {};
 
   std::set<rdcstr> ignores;
 
@@ -203,6 +202,8 @@ struct CachedHookData
 
   void ApplyHooks(const char *modName, HMODULE module)
   {
+    char lowername[512] = {};
+
     {
       size_t i = 0;
       while(modName[i])
@@ -920,32 +921,39 @@ static void InitHookData()
     s_HookData = new CachedHookData;
 
     RDCASSERT(s_HookData->DllHooks.empty());
-    s_HookData->DllHooks["kernel32.dll"].FunctionHooks.push_back(
-        FunctionHook("LoadLibraryA", NULL, &Hooked_LoadLibraryA));
-    s_HookData->DllHooks["kernel32.dll"].FunctionHooks.push_back(
-        FunctionHook("LoadLibraryW", NULL, &Hooked_LoadLibraryW));
-    s_HookData->DllHooks["kernel32.dll"].FunctionHooks.push_back(
-        FunctionHook("LoadLibraryExA", NULL, &Hooked_LoadLibraryExA));
-    s_HookData->DllHooks["kernel32.dll"].FunctionHooks.push_back(
-        FunctionHook("LoadLibraryExW", NULL, &Hooked_LoadLibraryExW));
-    s_HookData->DllHooks["kernel32.dll"].FunctionHooks.push_back(
-        FunctionHook("GetProcAddress", NULL, &Hooked_GetProcAddress));
 
-    for(const char *apiset :
-        {"api-ms-win-core-libraryloader-l1-1-0.dll", "api-ms-win-core-libraryloader-l1-1-1.dll",
-         "api-ms-win-core-libraryloader-l1-1-2.dll", "api-ms-win-core-libraryloader-l1-2-0.dll",
-         "api-ms-win-core-libraryloader-l1-2-1.dll"})
+    // The loader functions are registered under kernel32 and its api-set aliases, but they are
+    // applied to whichever module imports them - so the decision has to be made here, before any
+    // module has been processed. Hook.DLL.kernel32 == 0 means: leave the loader completely alone.
+    if(Hook_DLL_kernel32() != HookMode_Disabled)
     {
-      s_HookData->DllHooks[apiset].FunctionHooks.push_back(
+      s_HookData->DllHooks["kernel32.dll"].FunctionHooks.push_back(
           FunctionHook("LoadLibraryA", NULL, &Hooked_LoadLibraryA));
-      s_HookData->DllHooks[apiset].FunctionHooks.push_back(
+      s_HookData->DllHooks["kernel32.dll"].FunctionHooks.push_back(
           FunctionHook("LoadLibraryW", NULL, &Hooked_LoadLibraryW));
-      s_HookData->DllHooks[apiset].FunctionHooks.push_back(
+      s_HookData->DllHooks["kernel32.dll"].FunctionHooks.push_back(
           FunctionHook("LoadLibraryExA", NULL, &Hooked_LoadLibraryExA));
-      s_HookData->DllHooks[apiset].FunctionHooks.push_back(
+      s_HookData->DllHooks["kernel32.dll"].FunctionHooks.push_back(
           FunctionHook("LoadLibraryExW", NULL, &Hooked_LoadLibraryExW));
-      s_HookData->DllHooks[apiset].FunctionHooks.push_back(
+      s_HookData->DllHooks["kernel32.dll"].FunctionHooks.push_back(
           FunctionHook("GetProcAddress", NULL, &Hooked_GetProcAddress));
+
+      for(const char *apiset :
+          {"api-ms-win-core-libraryloader-l1-1-0.dll", "api-ms-win-core-libraryloader-l1-1-1.dll",
+           "api-ms-win-core-libraryloader-l1-1-2.dll", "api-ms-win-core-libraryloader-l1-2-0.dll",
+           "api-ms-win-core-libraryloader-l1-2-1.dll"})
+      {
+        s_HookData->DllHooks[apiset].FunctionHooks.push_back(
+            FunctionHook("LoadLibraryA", NULL, &Hooked_LoadLibraryA));
+        s_HookData->DllHooks[apiset].FunctionHooks.push_back(
+            FunctionHook("LoadLibraryW", NULL, &Hooked_LoadLibraryW));
+        s_HookData->DllHooks[apiset].FunctionHooks.push_back(
+            FunctionHook("LoadLibraryExA", NULL, &Hooked_LoadLibraryExA));
+        s_HookData->DllHooks[apiset].FunctionHooks.push_back(
+            FunctionHook("LoadLibraryExW", NULL, &Hooked_LoadLibraryExW));
+        s_HookData->DllHooks[apiset].FunctionHooks.push_back(
+            FunctionHook("GetProcAddress", NULL, &Hooked_GetProcAddress));
+      }
     }
 
     GetModuleHandleEx(
@@ -1006,6 +1014,14 @@ void LibraryHooks::RegisterFunctionHook(const char *libraryName, const FunctionH
       if(!_stricmp(libraryName, s.dll))
       {
         hookMode = s.mode();
+        // A launcher or optional injection adapter can override a known DLL's hook mode for
+        // this process without editing the user's shared settings. Restrict values to the
+        // existing modes and leave the configured mode intact for malformed overrides.
+        rdcstr variable = "RENDERDOC_HOOK_MODE_" + strupper(rdcstr(s.dll));
+        variable = variable.substr(0, variable.size() - 4);
+        rdcstr overrideMode = Process::GetEnvVariable(variable);
+        if(overrideMode.size() == 1 && overrideMode[0] >= '0' && overrideMode[0] <= '2')
+          hookMode = uint32_t(overrideMode[0] - '0');
         break;
       }
     }

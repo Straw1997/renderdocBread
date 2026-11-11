@@ -254,13 +254,13 @@ ShaderCodeEditor::ShaderCodeEditor(CodeEditorService *services, QWidget *parent)
   QObject::connect(m_Editor, &ScintillaEdit::verticalScrolled, this,
                    [this](int) { PositionAddToChatButton(); UpdateVisualDebugButton(); });
 
-  QObject::connect(m_FindReplace, &FindReplace::performFind, this,
+  QObject::connect(m_FindReplace, &FindReplace::performFindRequested, this,
                    [this]() { FindNext(m_FindReplace->direction() == FindReplace::Down); });
-  QObject::connect(m_FindReplace, &FindReplace::performFindAll, this,
+  QObject::connect(m_FindReplace, &FindReplace::performFindAllRequested, this,
                    &ShaderCodeEditor::UpdateFindCount);
-  QObject::connect(m_FindReplace, &FindReplace::performReplace, this,
+  QObject::connect(m_FindReplace, &FindReplace::performReplaceRequested, this,
                    &ShaderCodeEditor::ReplaceCurrent);
-  QObject::connect(m_FindReplace, &FindReplace::performReplaceAll, this,
+  QObject::connect(m_FindReplace, &FindReplace::performReplaceAllRequested, this,
                    &ShaderCodeEditor::ReplaceAll);
   QObject::connect(m_FindReplace, &FindReplace::searchChanged, this,
                    &ShaderCodeEditor::FindIncremental);

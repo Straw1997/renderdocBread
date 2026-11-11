@@ -22,10 +22,13 @@ do not require rebuilding an existing release.
 
 ## RenderDocBread portable Windows release
 
-Once packaging is authorized, use `PACKAGE_RENDERDOCBREAD.cmd` in the repository root, or run
-`./replaylab/packaging/Build-RenderDocBread.ps1`. This writes
-`dist/RenderDocBread-<timestamp>-win-x64.zip` and its `.sha256` file. The executable is
+Double-click `PACKAGE_RENDERDOCBREAD.cmd` in the repository root, or run
+`./replaylab/packaging/Build-RenderDocBread.ps1`. The standard package writes
+`dist/RenderDocBread-<version>-win-x64.zip` and its `.sha256` file using the frozen
+Host version. Other package profiles use timestamped names. The executable is
 `RenderDocBread.exe`. The archive has one enclosing `RenderDocBread` directory.
+Publish an update using the `autoUpdate` values in the package configuration and
+the [automatic update release contract](RELEASE_REQUIREMENTS.md#自动更新发布约定).
 
 `RenderDocBread.package.json` is the checked-in release configuration. Paths in this
 configuration are relative to the repository or application; release manifests contain

@@ -1,9 +1,9 @@
 ---
 name: renderdoc-resource-export
-description: Export a selected RenderDoc draw or resource set into a capture-linked mesh, texture, material and Shader package for Unity or Blender.
+description: Export RenderDoc draws or resources and restore captured effects in Unity or stock Unreal Engine, or deliver assets to Blender.
 metadata:
   replaylab-category: resource-export
-  replaylab-version: "32"
+  replaylab-version: "37"
 ---
 
 # Export captured resources
@@ -16,6 +16,53 @@ The source engine and destination engine are independent. Respect an existing
 target pipeline; Unity URP is the default for an unspecified new target. Use the configured
 source-engine reader for matching assets when available, and capture resources
 otherwise. Missing readers or original names do not block capture-based export.
+
+## Editable Unreal delivery
+
+For functional restoration or reassessment, read
+[unreal-restoration.md](references/unreal-restoration.md) before changing the
+project. It governs native lighting, editable graphs, live RT dependencies,
+regional comparisons and multi-view/frame delivery. Use the current standard
+when continuing existing work. An asset-only request retains its narrower scope.
+
+Use the target project's associated Editor. Call `start_unreal_project_connection`
+and poll `get_unreal_integration_job`. For an editable stock UE5 session, select
+`interactive=true` so the project-owned Python channel remains available while
+the Editor window is open. Subsequent tasks and Bread restarts can reconnect
+through the same tools without desktop input. Batch mode remains available for
+closed-project jobs. Preserve unsaved edits in any pre-existing Editor before
+switching its connection. This automatically sets up and verifies
+the available project provider. Discover its tools with
+`call_unreal_project_tool(tool_name="list_toolsets")` and
+`call_unreal_project_tool(tool_name="describe_toolset")`. Epic MCP uses the
+installed native plugin. On older stock UE5, Bread starts the installed Editor
+with its Python plugins as needed for each job. Use `BreadEditorTools.run_python`
+when advertised for project-local material, Blueprint, asset and
+level edits, including bespoke dependencies that the standard recipe cannot
+express. Set `result` to JSON-compatible values and explicitly save and verify
+assets. Poll queued edits. A successful batch connection leaves no running
+Editor to close. Only investigate an open Editor when a job reports an actual
+conflict, and preserve its unsaved edits.
+
+For each needed Draw, inspect its actual vertex inputs, capture and finalize a
+`gltf` package. Reuse existing export operations and their verified evidence.
+For a shared level, pass the first operation to
+`import_resource_export_to_unreal` and use `recipe.additionalMeshes` for the
+other validated Draws. Specify each material and transform. Use
+`get_unreal_restoration_recipe_schema` for the contract and record remaining
+source gaps. Use `render_unreal_restoration` and `review_unreal_restoration_layers`
+for managed observations where their recipe covers the effect. Use project-local
+observations where a recipe cannot express the required layer or regional test.
+
+When stock templates do not cover a captured dependency, inspect its raw
+evidence and try a project-local adapter using an available authorized
+execution route. If native shell launch fails, look up the connected
+`bread-portable` server's `bread-portable__bread_execute_code` tool, which is available when
+local execution is enabled. Inspect its current contract, then use it for
+relevant owned files and project-local Python/JS work. If an operation truly
+needs the desktop, discover `bread-portable__bread_windows`; match the snapshot's
+window ID and PID before sending input. Preserve unsaved work in other Editors. Keep unsupported shader inputs and pass differences explicit
+until recovered and measured.
 
 ## Editable Unity delivery
 

@@ -232,7 +232,7 @@ class _Benchmark(object):
             finally:
                 self.drained.set()
 
-        pyrenderdoc.Replay().AsyncInvoke("eid-benchmark-drain", sentinel)
+        pyrenderdoc.Replay().AsyncInvoke(sentinel, "eid-benchmark-drain")
         self.pending["draining"] = True
 
     @staticmethod
@@ -570,7 +570,7 @@ class _Benchmark(object):
                     self.failure_probe_done.set()
 
             try:
-                pyrenderdoc.Replay().AsyncInvoke("eid-benchmark-failure-probe", failure_probe)
+                pyrenderdoc.Replay().AsyncInvoke(failure_probe, "eid-benchmark-failure-probe")
                 self.failure_timer = QtCore.QTimer(self.application)
                 self.failure_timer.setInterval(25)
                 self.failure_timer.timeout.connect(self.poll_failure_probe)

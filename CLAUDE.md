@@ -98,7 +98,7 @@ The build keeps the running application's deployed files untouched, builds the G
 and assembles a private temporary staging directory. It validates translations, runtime
 hashes, pinned Shader compilers/language server, complete skill folders, relative paths,
 VC runtime DLLs and relocated executable startup before writing
-`dist/RenderDocBread-<timestamp>-win-x64.zip` plus SHA-256. It never stops live processes.
+the standard `dist/RenderDocBread-<version>-win-x64.zip` plus SHA-256. It never stops live processes.
 Read `replaylab/packaging/README.md` for dependencies, overrides and verification limits.
 The package configuration is `replaylab/packaging/RenderDocBread.package.json`.
 

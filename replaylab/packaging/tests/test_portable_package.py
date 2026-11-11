@@ -200,3 +200,16 @@ def test_frozen_vendor_metadata_audit_still_rejects_local_paths():
     assert package._vendor_support_source("deepagents/profiles/provider/_openai.py")
     assert package._vendor_support_source("numpy-2.5.2.dist-info/licenses/numpy/src/LICENSE")
     assert not package._vendor_support_source("profiles/session.json")
+
+
+
+@pytest.mark.parametrize("version", [None, "1.13", "01.13.129", "1.13.129-rc.1", "2147483648.0.0"])
+def test_standard_update_rejects_unsupported_versions(version):
+    config = package.read_json(package.REPO / "replaylab/packaging/RenderDocBread.package.json")
+    with pytest.raises(ValueError, match="standard release"):
+        package.standard_update_archive_name(config, version)
+
+
+def test_standard_update_archive_uses_release_version():
+    config = package.read_json(package.REPO / "replaylab/packaging/RenderDocBread.package.json")
+    assert package.standard_update_archive_name(config, "1.13.129") == "RenderDocBread-1.13.129-win-x64.zip"

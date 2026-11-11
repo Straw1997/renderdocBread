@@ -205,22 +205,21 @@ static bool VulkanReplayPatchUniformInputs(const DescSetLayout &layout, const Bi
   return true;
 }
 
-static std::shared_ptr<const VulkanActionTreeNode::ReplayDescriptorSnapshot>
-VulkanReplayPatchSnapshot(const VulkanActionTreeNode::ReplayDescriptorSnapshot &sets,
-                          VulkanReplayBindingEvidenceBudget &budget)
+static std::shared_ptr<const VulkanEventNode::ReplayDescriptorSnapshot> VulkanReplayPatchSnapshot(
+    const VulkanEventNode::ReplayDescriptorSnapshot &sets, VulkanReplayBindingEvidenceBudget &budget)
 {
   if(!budget.complete || sets.empty())
     return {};
   // Include the owning array/control allocation and every nested offset array, before allocating
   // any copy. Empty/unbound slots still occupy real storage and cannot bypass this charge.
-  if(!budget.ReserveStorage(1, sizeof(VulkanActionTreeNode::ReplayDescriptorSnapshot) + 64) ||
+  if(!budget.ReserveStorage(1, sizeof(VulkanEventNode::ReplayDescriptorSnapshot) + 64) ||
      !budget.ReserveStorage(sets.size(), sizeof(VulkanStatePipeline::DescriptorAndOffsets)))
     return {};
   for(const auto &set : sets)
     if((!set.offsets.empty() && !budget.ReserveStorage(1, 64)) ||
        !budget.ReserveStorage(set.offsets.size(), sizeof(uint32_t)))
       return {};
-  return std::make_shared<const VulkanActionTreeNode::ReplayDescriptorSnapshot>(sets);
+  return std::make_shared<const VulkanEventNode::ReplayDescriptorSnapshot>(sets);
 }
 
 static void VulkanReplayBindingEvidenceLost(bool &readsComplete, bool &writesComplete,
@@ -251,8 +250,8 @@ void WrappedVulkan::InvalidateReplayBindingEvidence(const char *reason)
   }
 }
 
-void WrappedVulkan::RecordReplayPatchUniformInputs(VulkanActionTreeNode &action,
-                                                  const VulkanStatePipeline &pipeline)
+void WrappedVulkan::RecordReplayPatchUniformInputs(VulkanEventNode &action,
+                                                   const VulkanStatePipeline &pipeline)
 {
   if(!m_ReplayBindingEvidenceBudget.complete)
     return;
@@ -271,7 +270,7 @@ static void VulkanReplayPatchRecordRead(std::map<ResourceId, uint32_t> &reads, R
   first = first ? RDCMIN(first, submittedEvent) : submittedEvent;
 }
 
-void WrappedVulkan::RecordReplayPatchSubmittedReads(const VulkanActionTreeNode &action)
+void WrappedVulkan::RecordReplayPatchSubmittedReads(const VulkanEventNode &action, uint32_t event)
 {
   if(!m_ReplayBindingEvidenceBudget.complete)
     return;
@@ -284,7 +283,6 @@ void WrappedVulkan::RecordReplayPatchSubmittedReads(const VulkanActionTreeNode &
     InvalidateReplayBindingEvidence("descriptorSubmissionWorkBudget");
     return;
   }
-  const uint32_t event = action.action.eventId;
   m_ReplayPatchReadLastEvent = RDCMAX(m_ReplayPatchReadLastEvent, event);
   rdcarray<ReplayBufferPatchRange> ranges;
   for(const VulkanStatePipeline::DescriptorAndOffsets &bound : action.ReplayPatchDescriptorSets())

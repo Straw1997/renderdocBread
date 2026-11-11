@@ -1,13 +1,13 @@
 #include "MeshUVView.h"
-#include "TexturePreviewChannels.h"
 #include "Code/QRDUtils.h"
+#include "TexturePreviewChannels.h"
 
 #include <QApplication>
 #include <QKeyEvent>
 #include <QMouseEvent>
-#include <QOpenGLShaderProgram>
 #include <QOpenGLContext>
 #include <QOpenGLFramebufferObject>
+#include <QOpenGLShaderProgram>
 #include <QOpenGLTexture>
 #include <QPainter>
 #include <QWheelEvent>
@@ -439,7 +439,7 @@ QRectF MeshUVView::overviewImageBounds() const
     bounds |= m_Mesh->geometry->bounds;
   bounds = atlasTransform().mapRect(bounds).adjusted(-16, -20, 16, 20).intersected(rect());
   return QRectF(bounds.x() / qMax(1, width()), bounds.y() / qMax(1, height()),
-                 bounds.width() / qMax(1, width()), bounds.height() / qMax(1, height()));
+                bounds.width() / qMax(1, width()), bounds.height() / qMax(1, height()));
 }
 
 QRectF MeshUVView::selectionImageBounds() const
@@ -461,8 +461,9 @@ QRectF MeshUVView::selectionImageBounds() const
       first = false;
     }
   bounds = bounds.adjusted(-6, -6, 6, 6).intersected(rect());
-  return first ? QRectF() : QRectF(bounds.x() / qMax(1, width()), bounds.y() / qMax(1, height()),
-                                  bounds.width() / qMax(1, width()), bounds.height() / qMax(1, height()));
+  return first ? QRectF()
+               : QRectF(bounds.x() / qMax(1, width()), bounds.y() / qMax(1, height()),
+                        bounds.width() / qMax(1, width()), bounds.height() / qMax(1, height()));
 }
 
 void MeshUVView::selectUVRegion(const QRectF &bounds, bool restrictToSelection)
@@ -479,8 +480,9 @@ void MeshUVView::selectUVRegion(const QRectF &bounds, bool restrictToSelection)
       const quint64 key = m_Mesh->key(face, corner);
       if(restrictToSelection && !m_Mesh->selected.contains(key))
         continue;
-      const int count = m_Mesh->mode == MeshUVData::Selection::Face ? 3
-                        : m_Mesh->mode == MeshUVData::Selection::Edge ? 2 : 1;
+      const int count = m_Mesh->mode == MeshUVData::Selection::Face   ? 3
+                        : m_Mesh->mode == MeshUVData::Selection::Edge ? 2
+                                                                      : 1;
       QPainterPath shape;
       bool valid = true;
       for(int j = 0; j < count; ++j)
@@ -821,7 +823,8 @@ void MeshUVView::selectLinked()
 
 void MeshUVView::selectLinkedFrom(const std::function<void()> &pick)
 {
-  if(!m_Mesh->geometry) return;
+  if(!m_Mesh->geometry)
+    return;
   const auto previous = m_Mesh->selected;
   const auto mode = m_Mesh->mode;
   const auto callback = selectionChanged;
@@ -838,13 +841,13 @@ void MeshUVView::selectLinkedFrom(const std::function<void()> &pick)
 
 void MeshUVView::selectLinkedAt(const QPointF &point)
 {
-  selectLinkedFrom([this,point]() { selectAt(point,false); });
+  selectLinkedFrom([this, point]() { selectAt(point, false); });
 }
 
 void MeshUVView::selectMeshLinked(const QPointF &point, const QSize &size,
                                   const QMatrix4x4 &transform, bool homogenous)
 {
-  selectLinkedFrom([=]() { selectMesh(point,size,transform,homogenous,false); });
+  selectLinkedFrom([=]() { selectMesh(point, size, transform, homogenous, false); });
 }
 
 void MeshUVView::clearSelection()
@@ -1227,8 +1230,7 @@ void MeshUVTextureView::paintGL()
   m_Shader->setUniformValue("homogenous", m_Homogenous);
   m_Shader->setUniformValue("depthBias", 0.0f);
   m_Shader->setUniformValue("roundPoint", false);
-  m_Shader->setUniformValue("viewportSize",
-                            QVector2D(pixels.width(), pixels.height()));
+  m_Shader->setUniformValue("viewportSize", QVector2D(pixels.width(), pixels.height()));
   m_Shader->setUniformValue("flipY", m_Mesh->flipTexture);
   m_Shader->setUniformValue("image", 0);
   m_Shader->setUniformValue("textured", m_Texture != nullptr);

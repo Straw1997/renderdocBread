@@ -59,14 +59,19 @@ Attach codeBlocks from the finalized, validated Shader Workspace to computation
 nodes when code helps, covering their needed initialization
 and actual calculation rather than only one helper for the whole effect.
 Each block uses saved-source hashes, sourceRanges and/or exact example mappings
-as described below. Keep input/operation/result-use explanations in plain
+as described below. Use `notes: [{sourceLine, text}]` to place a short explanation
+above a shown source line at the start of a meaningful group. Explain the group's
+purpose, why an important parameter is used or what the result feeds. Use the
+user's language and keep the saved source and its line/token mappings intact.
+Keep input/operation/result-use explanations in plain
 language and use [the relevant phrase](rdoc://...) for precise inline navigation.
 In the selected node's details, write calculation as a few short lines of pseudocode that express the node's
 defining operation and what it produces. For a procedural shape, show the rule
 that forms or weights the shape instead of spending the snippet on random seeds
 or coordinate setup. Keep short statements on one line, separate statements
-with newlines, and end each with an ASCII semicolon. Use ASCII `.` for member
-access and `*` for multiplication. Keep code out of the graph itself. For
+with newlines, and end each with an ASCII semicolon. Add brief `//` comments to
+explain what key steps do, especially thresholds, masks and mixing. Use ASCII `.`
+for member access and `*` for multiplication. Keep code out of the graph itself. For
 texture links, use `rdoc://texture/<ResourceId>?eid=<EID>&kind=srv` with the
 verified texture, its consuming or producing event, and its actual attachment kind
 (`srv`, `uav`, `rtv`, `dsv` or `present`). Links in the summary and graph

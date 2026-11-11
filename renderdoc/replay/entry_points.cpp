@@ -208,8 +208,9 @@ extern "C" RENDERDOC_API void RENDERDOC_CC RENDERDOC_SetMeshPreviewOrbit(ICamera
     static_cast<Camera *>(camera)->SetTurntableRotation(yaw, pitch);
 }
 
-extern "C" RENDERDOC_API void RENDERDOC_CC RENDERDOC_RotateMeshPreviewOrbit(ICamera *camera, float yaw,
-                                                                         float pitch, bool inverted)
+extern "C" RENDERDOC_API void RENDERDOC_CC RENDERDOC_RotateMeshPreviewOrbit(ICamera *camera,
+                                                                            float yaw, float pitch,
+                                                                            bool inverted)
 {
   if(camera)
     static_cast<Camera *>(camera)->RotateMeshPreviewOrbit(yaw, pitch, inverted);
@@ -438,11 +439,6 @@ RENDERDOC_ExecuteAndInject(const rdcstr &app, const rdcstr &workingDir, const rd
   ret.result = status.first;
   ret.ident = status.second;
   return ret;
-}
-
-extern "C" RENDERDOC_API void RENDERDOC_CC RENDERDOC_GetDefaultCaptureOptions(CaptureOptions *opts)
-{
-  *opts = CaptureOptions();
 }
 
 extern "C" RENDERDOC_API ResultDetails RENDERDOC_CC RENDERDOC_StartGlobalHook(

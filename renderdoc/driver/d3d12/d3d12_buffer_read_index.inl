@@ -145,16 +145,6 @@ void D3D12CommandData::ObserveBufferPatchReads(BakedCmdListInfo &info, D3D12Chun
   }
 }
 
-static void GatherBufferPatchCopyReads(const D3D12ActionTreeNode &node,
-                                       std::map<uint32_t, std::set<ResourceId>> &reads)
-{
-  for(const auto &use : node.resourceUsage)
-    if(use.second.usage == ResourceUsage::CopySrc || use.second.usage == ResourceUsage::Copy)
-      reads[use.second.eventId].insert(use.first);
-  for(const auto &child : node.children)
-    GatherBufferPatchCopyReads(child, reads);
-}
-
 bool D3D12CommandData::GetBufferPatchRangeConsumer(const std::map<ResourceId, uint64_t> &buffers,
                                                    const rdcarray<ReplayBufferPatchRange> &changes,
                                                    uint32_t &first)
@@ -239,9 +229,7 @@ bool D3D12CommandData::GetBufferPatchRangeConsumer(const std::map<ResourceId, ui
         break;
       }
       const auto &info = found->second;
-      std::map<uint32_t, std::set<ResourceId>> copies;
-      if(info.action)
-        GatherBufferPatchCopyReads(*info.action, copies);
+      const auto &copies = info.bufferPatchCopyReads;
       for(uint32_t base : submission.second)
       {
         if(!base || !info.eventCount || uint64_t(base) + info.eventCount > m_Events.size())
@@ -277,7 +265,7 @@ bool D3D12CommandData::GetBufferPatchRangeConsumer(const std::map<ResourceId, ui
             fail("missingCopySourceEvidence");
             break;
           }
-          for(ResourceId source : copies[chunk.eventAfter - 1])
+          for(ResourceId source : copies.at(chunk.eventAfter - 1))
             add(base + chunk.eventAfter - 1, source, 0, ~0ULL);
         }
         for(const auto &read : info.bufferPatchReads)

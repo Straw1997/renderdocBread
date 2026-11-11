@@ -569,8 +569,8 @@ QString safeMarkdown(QString text)
   int listKind = 0;
   bool listItemOpen = false;
   auto closeLists = [&]() {
-    // i18n-ignore: closing HTML list-item tag, no user-visible prose.
-    if(listItemOpen) html += lit("</li>");
+    if(listItemOpen)
+      html += lit("</li>");    // i18n-ignore: closing HTML list-item tag.
     listItemOpen = false;
     closeList(html, listKind);
   };
@@ -582,8 +582,10 @@ QString safeMarkdown(QString text)
     if(trimmed.startsWith(lit("```")))
     {
       if(!codeBlock)
-        codeInList = listItemOpen && (line.startsWith(lit("  ")) || line.startsWith(QLatin1Char('\t')));
-      if(!codeInList) closeLists();
+        codeInList =
+            listItemOpen && (line.startsWith(lit("  ")) || line.startsWith(QLatin1Char('\t')));
+      if(!codeInList)
+        closeLists();
       if(codeBlock)
       {
         html += renderFencedCode(codeLines, codeLanguage);
@@ -606,16 +608,20 @@ QString safeMarkdown(QString text)
     if(trimmed.isEmpty())
     {
       int next = row + 1;
-      while(next < lines.size() && lines[next].trimmed().isEmpty()) ++next;
+      while(next < lines.size() && lines[next].trimmed().isEmpty())
+        ++next;
       row = next - 1;
       int orderedStart = 0;
-      const bool continues = listKind && next < lines.size() &&
+      const bool continues =
+          listKind && next < lines.size() &&
           (lines[next].startsWith(lit("  ")) || lines[next].startsWith(QLatin1Char('\t')) ||
            (lines[next].trimmed().startsWith(QLatin1Char('[')) &&
             lines[next].trimmed().endsWith(QLatin1Char(')'))) ||
            (listKind == 2 && orderedListLine(lines[next], orderedStart)) ||
-           (listKind == 1 && (lines[next].startsWith(lit("- ")) || lines[next].startsWith(lit("* ")))));
-      if(!continues) closeLists();
+           (listKind == 1 &&
+            (lines[next].startsWith(lit("- ")) || lines[next].startsWith(lit("* ")))));
+      if(!continues)
+        closeLists();
       continue;
     }
 
@@ -663,8 +669,8 @@ QString safeMarkdown(QString text)
         html += lit("<ul>");
         listKind = 1;
       }
-      // i18n-ignore: structural list-item HTML contains model-authored text separately.
-      if(listItemOpen) html += lit("</li>");
+      if(listItemOpen)
+        html += lit("</li>");    // i18n-ignore: closing HTML list-item tag.
       // i18n-ignore: opening HTML list-item tag, no user-visible prose.
       html += lit("<li>") + inlineMarkdown(line.mid(2));
       listItemOpen = true;
@@ -680,8 +686,8 @@ QString safeMarkdown(QString text)
         html += lit("<ol>");
         listKind = 2;
       }
-      // i18n-ignore: closing HTML list-item tag, no user-visible prose.
-      if(listItemOpen) html += lit("</li>");
+      if(listItemOpen)
+        html += lit("</li>");    // i18n-ignore: closing HTML list-item tag.
       // i18n-ignore: opening HTML list-item tag, no user-visible prose.
       html += lit("<li>") + inlineMarkdown(line.mid(orderedStart));
       listItemOpen = true;
@@ -692,7 +698,8 @@ QString safeMarkdown(QString text)
     {
       // A Qt 5 list item is one QTextBlock. Line breaks keep explanatory text
       // and source links in that item instead of restarting the next number.
-      const bool citation = trimmed.startsWith(QLatin1Char('[')) && trimmed.endsWith(QLatin1Char(')'));
+      const bool citation =
+          trimmed.startsWith(QLatin1Char('[')) && trimmed.endsWith(QLatin1Char(')'));
       // i18n-ignore: whitespace and structural HTML line break, no prose.
       html += (citation ? lit(" ") : lit("<br />")) + inlineMarkdown(trimmed);
       continue;
@@ -1783,8 +1790,8 @@ protected:
           continue;
         const QFont labelFont = overlay.format.font().resolve(font());
         clock.setFont(labelFont);
-        const qreal width = qMax<qreal>(last.left() - first.left(),
-                                       QFontMetricsF(labelFont).width(overlay.text)) + 2;
+        const qreal width =
+            qMax<qreal>(last.left() - first.left(), QFontMetricsF(labelFont).width(overlay.text)) + 2;
         const QRectF area(first.left(), first.top(),
                           qMin<qreal>(width, viewport()->width() - first.left()), first.height());
         if(area.width() <= 0 || !area.intersects(QRectF(event->rect())))
@@ -3808,8 +3815,8 @@ void AIConversationView::render(bool preserveScroll)
         // so the click can resolve the event from its verified diagram.
         static const QRegularExpression resourceHref(
             QStringLiteral(R"link(href="(rdoc://resource/(?:ResourceId::)?[0-9]+)")link"));
-        formattedText.replace(resourceHref,
-                              QStringLiteral("href=\"\\1?visual=%1\"").arg(visualIdentities.last()));
+        formattedText.replace(
+            resourceHref, QStringLiteral("href=\"\\1?visual=%1\"").arg(visualIdentities.last()));
       }
       if(!message.artifacts.isEmpty())
         // i18n-ignore: Generated anchor prefixes are internal transcript identifiers.
@@ -3819,8 +3826,7 @@ void AIConversationView::render(bool preserveScroll)
       html += lit("<div class=\"assistant\"><a class=\"message-marker\" name=\"") +
               anchor.toHtmlEscaped() +
               // i18n-ignore: Structural transcript HTML and zero-width marker contain no prose.
-              lit("\">&#8203;</a>") +
-              renderMessageAttachments(message.attachments, document) +
+              lit("\">&#8203;</a>") + renderMessageAttachments(message.attachments, document) +
               formattedText +
               renderMessageArtifacts(message, m_ExpandedArtifactMessages.contains(message.id),
                                      messageIndex) +

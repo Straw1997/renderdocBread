@@ -1692,7 +1692,7 @@ def test_live_usage_queries_replay_once_and_only_ui_drain_publishes(tmp_path):
     invoke = panel.ctx.Replay.return_value.AsyncInvoke
     invoke.assert_called_once()
     assert panel._workspace_event_ids == {}
-    replay_callback = invoke.call_args.args[-1]
+    replay_callback = invoke.call_args.args[0]
     controller = types.SimpleNamespace(GetUsage=lambda resource: [
         types.SimpleNamespace(eventId=event) for event in (7, 3, 7, 0)])
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -1715,7 +1715,7 @@ def test_live_usage_survives_representative_catalog_refresh_without_requery(tmp_
     panel._workspaces["one"] = workspace
     panel._request_live_usage([workspace])
     invoke = panel.ctx.Replay.return_value.AsyncInvoke
-    invoke.call_args.args[-1](types.SimpleNamespace(GetUsage=lambda _rid: [
+    invoke.call_args.args[0](types.SimpleNamespace(GetUsage=lambda _rid: [
         types.SimpleNamespace(eventId=event) for event in events]))
     panel._drain_usage_results()
     snapshot = {"snapshot": {"workspaces": [workspace]}, "eventIds": {"one": [11371]},
@@ -1736,7 +1736,7 @@ def test_live_usage_is_shared_by_same_resource_workspaces_and_cached_late_arriva
     panel._request_live_usage([one, two])
     invoke = panel.ctx.Replay.return_value.AsyncInvoke
     invoke.assert_called_once()
-    invoke.call_args.args[-1](types.SimpleNamespace(GetUsage=lambda _rid: [
+    invoke.call_args.args[0](types.SimpleNamespace(GetUsage=lambda _rid: [
         types.SimpleNamespace(eventId=11384), types.SimpleNamespace(eventId=11371)]))
     panel._drain_usage_results()
     assert panel._workspace_event_ids == {"one": [11371, 11384], "two": [11371, 11384]}
@@ -1758,7 +1758,7 @@ def test_live_usage_distinct_shaders_survive_native_tag_coalescing(tmp_path):
     # Same behavior as ReplayManager::PushInvoke: a new tag replaces the older
     # callback still queued under that tag, with no callback/cancellation signal.
     queued = {}
-    panel.ctx.Replay.return_value.AsyncInvoke.side_effect = lambda tag, callback: queued.update({tag: callback})
+    panel.ctx.Replay.return_value.AsyncInvoke.side_effect = lambda callback, tag: queued.update({tag: callback})
     panel._request_live_usage(workspaces)
     assert len(queued) == 3
     queried = []
@@ -1791,10 +1791,10 @@ def test_project_document_unions_all_current_capture_physical_bindings(tmp_path)
     assert len(calls) == 2  # Once per original resource, no replay/EID traversal.
     controller = types.SimpleNamespace(GetUsage=lambda rid: [
         types.SimpleNamespace(eventId=eid) for eid in ({721: [10, 11], 722: [11, 20]}[rid])])
-    calls[0].args[-1](controller)
+    calls[0].args[0](controller)
     panel._drain_usage_results()
     assert not module._workspace_usage_complete(primary, binding, panel._usage_cache)
-    calls[1].args[-1](controller)
+    calls[1].args[0](controller)
     panel._drain_usage_results()
     assert module._workspace_usage_complete(primary, binding, panel._usage_cache)
     assert panel._workspace_event_ids == {"one": [10, 11, 20]}
@@ -1940,7 +1940,7 @@ def test_live_usage_from_previous_capture_never_publishes_or_clears_new_pending(
     panel._workspace_event_ids["one"] = [99]
     panel._request_live_usage([workspace])
     invoke = panel.ctx.Replay.return_value.AsyncInvoke
-    old_callback = invoke.call_args.args[-1]
+    old_callback = invoke.call_args.args[0]
     old_controller = types.SimpleNamespace(GetUsage=mock.Mock(return_value=[
         types.SimpleNamespace(eventId=11)]))
     if delivery in ("after-queue", "before-refresh", "same-binding-reopen"):
@@ -1964,7 +1964,7 @@ def test_live_usage_from_previous_capture_never_publishes_or_clears_new_pending(
     assert panel._workspace_event_ids == {}
     panel._workspaces["one"] = workspace
     panel._request_live_usage([workspace])
-    new_callback = invoke.call_args.args[-1]
+    new_callback = invoke.call_args.args[0]
     new_pending = set(panel._usage_pending)
     assert new_pending
     if delivery == "before-query":
@@ -1990,7 +1990,7 @@ def test_live_usage_finishing_during_capture_reopen_is_discarded_before_enqueue(
     workspace = {"workspaceId": "one", "resourceId": 77, "capturePath": first["capturePath"]}
     panel._workspaces["one"] = workspace
     panel._request_live_usage([workspace])
-    callback = panel.ctx.Replay.return_value.AsyncInvoke.call_args.args[-1]
+    callback = panel.ctx.Replay.return_value.AsyncInvoke.call_args.args[0]
     started, resume = threading.Event(), threading.Event()
 
     def get_usage(_rid):
@@ -2020,7 +2020,7 @@ def test_live_usage_result_requires_workspace_to_still_bind_requested_resource(t
     workspace = {"workspaceId": "one", "resourceId": 77, "capturePath": first["capturePath"]}
     panel._workspaces["one"] = workspace
     panel._request_live_usage([workspace])
-    callback = panel.ctx.Replay.return_value.AsyncInvoke.call_args.args[-1]
+    callback = panel.ctx.Replay.return_value.AsyncInvoke.call_args.args[0]
     callback(types.SimpleNamespace(GetUsage=lambda _rid: [types.SimpleNamespace(eventId=11)]))
     if change == "removed":
         panel._workspaces.clear()

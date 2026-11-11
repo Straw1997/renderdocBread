@@ -447,6 +447,25 @@ class ResourceExportPureHelperTests(unittest.TestCase):
             values = list(struct.unpack("<%df" % (len(payload) // 4), payload))
             return logical, values
 
+    def test_vulkan_zero_stride_reads_one_bound_element(self) -> None:
+        controller = _MeshController([0.0, 3.25, 2.0], None)
+        pipeline = _pipeline(controller, False)
+        binding = pipeline.GetVBuffers()[0]
+        binding.byteStride = 0
+        attribute = pipeline.GetVertexInputs()[0]
+        attribute.byteOffset = 4
+        record = self.module._attribute_metadata(attribute, 0, [binding])
+        with tempfile.TemporaryDirectory() as temporary:
+            writer = self.module._ArtifactWriter(temporary)
+            self.module._capture_attribute(
+                controller, attribute, record, [1, 9, 20], types.SimpleNamespace(),
+                {"api": "Vulkan", "instance": 0}, writer,
+            )
+            self.assertEqual("captured", record["canonical"]["status"])
+            self.assertEqual(4, record["raw"]["sourceSpanByteLength"])
+            path = Path(temporary) / record["canonical"]["path"]
+            self.assertEqual((3.25, 3.25, 3.25), struct.unpack("<3f", path.read_bytes()))
+
     def test_indexed_draw_applies_base_vertex_but_not_vertex_offset_twice(self) -> None:
         logical, values = self._captured_position_values(indexed=True)
         self.assertEqual([6, 8], logical)

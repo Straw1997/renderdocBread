@@ -97,6 +97,7 @@ def build_native_mcp_route(
     disabled_skills: Sequence[str] = (),
     mcp_servers: Sequence[Mapping[str, object]] = (),
     full_host_catalog: bool = False,
+    editor_python_enabled: bool = False,
 ) -> NativeMCPRoute | None:
     """Build the shared Skill/Host/external route without requiring a capture."""
 
@@ -166,6 +167,7 @@ def build_native_mcp_route(
                     if key.upper() in MCP_HOST_PROVIDER_ENV} if context.instance_id else {})
     if context.instance_id:
         environment["REPLAYLAB_INSTANCE_ID"] = context.instance_id
+        environment["BREAD_UNREAL_EDITOR_PYTHON"] = "1" if editor_python_enabled and "project" in effects else "0"
     environment.update({
         TASK_ID_ENV: context.task_id,
         TASK_EVENT_ROOT_ENV: str(event_root),

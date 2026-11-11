@@ -3226,6 +3226,11 @@ void TextureViewer::SetFlipY(bool flipped)
   ui->flip_y->setChecked(flipped);
 }
 
+rdcfixedarray<bool, 4> TextureViewer::GetChannelVisibility()
+{
+  return {m_TexDisplay.red, m_TexDisplay.green, m_TexDisplay.blue, m_TexDisplay.alpha};
+}
+
 void TextureViewer::SetChannelVisibility(bool red, bool green, bool blue, bool alpha)
 {
   ui->channelRed->setChecked(red);

@@ -245,6 +245,7 @@ class NativeAgentEngine:
                 skill_roots=tuple(self.config.skill_roots or self.catalog.roots),
                 disabled_skills=tuple(self.config.disabled_skills),
                 mcp_servers=tuple(self.config.external_mcp_servers),
+                editor_python_enabled=self.config.native_shell_enabled,
             )
             visible_catalog = CatalogView(
                 skills={

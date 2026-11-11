@@ -480,6 +480,7 @@ rdcstr DoStringise(const ReplayProxyPacket &el)
     STRINGISE_ENUM_NAMED(eReplayProxy_GetBuffer, "GetBuffer");
     STRINGISE_ENUM_NAMED(eReplayProxy_GetShaderEntryPoints, "GetShaderEntryPoints");
     STRINGISE_ENUM_NAMED(eReplayProxy_GetShader, "GetShader");
+    STRINGISE_ENUM_NAMED(eReplayProxy_GetShaderReflectionByPointer, "GetShaderReflectionByPointer");
     STRINGISE_ENUM_NAMED(eReplayProxy_GetDebugMessages, "GetDebugMessages");
 
     STRINGISE_ENUM_NAMED(eReplayProxy_GetBufferData, "GetBufferData");
@@ -716,6 +717,9 @@ ReplayProxy::~ReplayProxy()
   m_Proxy = NULL;
 
   for(auto it = m_ShaderReflectionCache.begin(); it != m_ShaderReflectionCache.end(); ++it)
+    delete it->second;
+
+  for(auto it = m_PointerReflectionCache.begin(); it != m_PointerReflectionCache.end(); ++it)
     delete it->second;
 }
 
@@ -2010,6 +2014,67 @@ const ShaderReflection *ReplayProxy::GetShader(ResourceId pipeline, ResourceId s
 }
 
 template <typename ParamSerialiser, typename ReturnSerialiser>
+const ShaderReflection *ReplayProxy::Proxied_GetShaderReflectionByPointer(ParamSerialiser &paramser,
+                                                                          ReturnSerialiser &retser,
+                                                                          uint64_t reflectionPointer)
+{
+  const ReplayProxyPacket expectedPacket = eReplayProxy_GetShaderReflectionByPointer;
+  ReplayProxyPacket packet = eReplayProxy_GetShaderReflectionByPointer;
+
+  const ShaderReflection *reflection = NULL;
+
+  // Host-side cache check, before requesting on the remote
+  if(retser.IsReading())
+  {
+    auto it = m_PointerReflectionCache.find(reflectionPointer);
+
+    if(it != m_PointerReflectionCache.end())
+      return it->second;
+  }
+
+  // Serialize the request containing the opaque pointer value.
+  {
+    BEGIN_PARAMS();
+    SERIALISE_ELEMENT(reflectionPointer);
+    END_PARAMS();
+  }
+
+  // Only the remote can dereference this pointer.
+  if(paramser.IsReading())
+  {
+    reflection = (const ShaderReflection *)(uintptr_t)reflectionPointer;
+  }
+
+  // Allocate a local copy of the ShaderReflection object on the host
+  // and store it in the cache
+  {
+    ReturnSerialiser &ser = retser;
+    PACKET_HEADER(packet);
+    SERIALISE_ELEMENT_OPT(reflection);
+    SERIALISE_ELEMENT(packet);
+    ser.EndChunk();
+
+    // The remote pointer is only a lookup token, so the reflection is serialised to create a local
+    // copy. The serialiser owns this allocation; setting the pointer to NULL effectively steals it
+    // into the cache, which takes ownership.
+    if(ser.IsReading())
+    {
+      m_PointerReflectionCache[reflectionPointer] = reflection;
+      reflection = NULL;
+    }
+  }
+
+  CheckError(packet, expectedPacket);
+
+  return m_PointerReflectionCache[reflectionPointer];
+}
+
+const ShaderReflection *ReplayProxy::GetShaderReflectionByPointer(uint64_t reflectionPointer)
+{
+  PROXY_FUNCTION(GetShaderReflectionByPointer, reflectionPointer);
+}
+
+template <typename ParamSerialiser, typename ReturnSerialiser>
 rdcstr ReplayProxy::Proxied_DisassembleShader(ParamSerialiser &paramser, ReturnSerialiser &retser,
                                               ResourceId pipeline, const ShaderReflection *refl,
                                               const rdcstr &target)
@@ -2146,10 +2211,14 @@ void ReplayProxy::Proxied_ReloadShaderDebugInformation(ParamSerialiser &paramser
   const ReplayProxyPacket expectedPacket = eReplayProxy_ReloadShaderDebugInformation;
   ReplayProxyPacket packet = eReplayProxy_ReloadShaderDebugInformation;
 
-  // Clear the shader refleciton cache
+  // Clear the shader reflection cache
   for(auto it = m_ShaderReflectionCache.begin(); it != m_ShaderReflectionCache.end(); ++it)
     delete it->second;
   m_ShaderReflectionCache.clear();
+
+  for(auto it = m_PointerReflectionCache.begin(); it != m_PointerReflectionCache.end(); ++it)
+    delete it->second;
+  m_PointerReflectionCache.clear();
 
   {
     BEGIN_PARAMS();
@@ -2611,13 +2680,17 @@ void ReplayProxy::Proxied_SavePipelineState(ParamSerialiser &paramser, ReturnSer
         };
 
         for(size_t i = 0; i < ARRAY_COUNT(stages); i++)
-          if(stages[i]->resourceId != ResourceId())
+          if(stages[i]->reflection != 0)
+          {
             stages[i]->reflection =
-                GetShader(ResourceId(), stages[i]->resourceId, ShaderEntryPoint());
+                GetShaderReflectionByPointer((uint64_t)(uintptr_t)stages[i]->reflection);
+          }
 
-        if(m_D3D11PipelineState->inputAssembly.resourceId != ResourceId())
-          m_D3D11PipelineState->inputAssembly.bytecode = GetShader(
-              ResourceId(), m_D3D11PipelineState->inputAssembly.resourceId, ShaderEntryPoint());
+        if(m_D3D11PipelineState->inputAssembly.bytecode != NULL)
+        {
+          m_D3D11PipelineState->inputAssembly.bytecode = GetShaderReflectionByPointer(
+              (uint64_t)(uintptr_t)m_D3D11PipelineState->inputAssembly.bytecode);
+        }
       }
       else if(m_APIProps.pipelineType == GraphicsAPI::D3D12 && m_D3D12PipelineState)
       {
@@ -2628,11 +2701,10 @@ void ReplayProxy::Proxied_SavePipelineState(ParamSerialiser &paramser, ReturnSer
             &m_D3D12PipelineState->ampShader,    &m_D3D12PipelineState->meshShader,
         };
 
-        ResourceId pipe = m_D3D12PipelineState->pipelineResourceId;
-
         for(size_t i = 0; i < ARRAY_COUNT(stages); i++)
-          if(stages[i]->resourceId != ResourceId())
-            stages[i]->reflection = GetShader(pipe, stages[i]->resourceId, ShaderEntryPoint());
+          if(stages[i]->reflection != 0)
+            stages[i]->reflection =
+                GetShaderReflectionByPointer((uint64_t)(uintptr_t)stages[i]->reflection);
       }
       else if(m_APIProps.pipelineType == GraphicsAPI::OpenGL && m_GLPipelineState)
       {
@@ -2643,9 +2715,9 @@ void ReplayProxy::Proxied_SavePipelineState(ParamSerialiser &paramser, ReturnSer
         };
 
         for(size_t i = 0; i < ARRAY_COUNT(stages); i++)
-          if(stages[i]->shaderResourceId != ResourceId())
+          if(stages[i]->reflection != 0)
             stages[i]->reflection =
-                GetShader(ResourceId(), stages[i]->shaderResourceId, ShaderEntryPoint());
+                GetShaderReflectionByPointer((uint64_t)(uintptr_t)stages[i]->reflection);
       }
       else if(m_APIProps.pipelineType == GraphicsAPI::Vulkan && m_VulkanPipelineState)
       {
@@ -2656,17 +2728,11 @@ void ReplayProxy::Proxied_SavePipelineState(ParamSerialiser &paramser, ReturnSer
             &m_VulkanPipelineState->taskShader,     &m_VulkanPipelineState->meshShader,
         };
 
-        ResourceId pipe = m_VulkanPipelineState->graphics.pipelineResourceId;
-
         for(size_t i = 0; i < ARRAY_COUNT(stages); i++)
         {
-          if(i == 5)
-            pipe = m_VulkanPipelineState->compute.pipelineResourceId;
-
-          if(stages[i]->resourceId != ResourceId())
+          if(stages[i]->reflection != 0)
             stages[i]->reflection =
-                GetShader(pipe, stages[i]->resourceId,
-                          ShaderEntryPoint(stages[i]->entryPoint, stages[i]->stage));
+                GetShaderReflectionByPointer((uint64_t)(uintptr_t)stages[i]->reflection);
         }
       }
     }
@@ -3813,7 +3879,11 @@ IReplayDriver *ReplayProxy::MakeDummyDriver()
     shaders.push_back(it->second);
   m_ShaderReflectionCache.clear();
 
-  IReplayDriver *dummy = new DummyDriver(this, shaders, m_StructuredFile);
+  for(auto it : m_PointerReflectionCache)
+    shaders.push_back(it.second);
+  m_PointerReflectionCache.clear();
+
+  IReplayDriver *dummy = new DummyDriver(this, shaders, m_StructuredFile, {});
 
   // the dummy driver now owns the file, remove our reference
   m_StructuredFile = NULL;
@@ -3883,6 +3953,7 @@ bool ReplayProxy::Tick(int type)
     case eReplayProxy_GetBuffer: GetBuffer(ResourceId()); break;
     case eReplayProxy_GetShaderEntryPoints: GetShaderEntryPoints(ResourceId()); break;
     case eReplayProxy_GetShader: GetShader(ResourceId(), ResourceId(), ShaderEntryPoint()); break;
+    case eReplayProxy_GetShaderReflectionByPointer: GetShaderReflectionByPointer(0); break;
     case eReplayProxy_GetDebugMessages: GetDebugMessages(); break;
     case eReplayProxy_GetBufferData:
     {

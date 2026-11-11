@@ -652,7 +652,9 @@ try {
     })
     $mcpProviderData = @(
         ($continuationDriverSource + ":replaylab_helpers"),
-        ((Join-Path $replayLabRoot "unity") + ":bread_unity")
+        ((Join-Path $replayLabRoot "unity") + ":bread_unity"),
+        ((Join-Path $mcpRoot "src/unreal_editor_script.py") + ":bread_unreal"),
+        ((Join-Path $mcpRoot "src/unreal_live_editor.py") + ":bread_unreal")
     )
     $agentData = @($agentSkillData) + @($mcpProviderData)
     $agentData += ((Join-Path $replayLabRoot "pyproject.toml") + ":replaylab_agent")

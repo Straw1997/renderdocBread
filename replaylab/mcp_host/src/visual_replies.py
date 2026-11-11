@@ -162,6 +162,11 @@ class CodeMapping(Spec):
     sourceSymbol: str = Field(default='',pattern=r'^[A-Za-z_][A-Za-z0-9_]*$|^$')
 
 
+class CodeNote(Spec):
+    sourceLine: int = Field(ge=1, le=10000000)
+    text: str = Field(min_length=1, max_length=240, pattern=r'^[^\r\n]*\S[^\r\n]*$')
+
+
 class CodeBlock(Spec):
     title: str = Field(default='',max_length=160)
     workspacePath: str = Field(min_length=1,max_length=32768)
@@ -172,6 +177,7 @@ class CodeBlock(Spec):
     exampleCode: str = Field(default='',max_length=16000)
     sourceRanges: list[CodeRange] = Field(default_factory=list,max_length=12)
     codeMappings: list[CodeMapping] = Field(default_factory=list,max_length=240)
+    notes: list[CodeNote] = Field(default_factory=list, max_length=12)
 
     @model_validator(mode='after')
     def source(self):
@@ -448,6 +454,12 @@ def publish(title: str, cards: list[dict], context: dict, *, capture_image: Call
                     code=read_code(block)
                     from .code_excerpts import validate_fragment
                     validate_fragment(code['text'])
+                    if block.notes:
+                        visible_lines = set(code.get('lineNumbers', ()))
+                        noted_lines = {note.sourceLine for note in block.notes}
+                        if not noted_lines <= visible_lines or len(noted_lines) != len(block.notes):
+                            raise ValueError('Code notes need distinct saved-source lines visible in this block')
+                        code = dict(code, notes=[note.model_dump() for note in block.notes])
                     saved['codeBlocks'].append(dict(code,title=block.title))
                 card['nodes'].append(saved)
         if spec.type=='code':

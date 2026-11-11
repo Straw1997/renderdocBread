@@ -360,7 +360,7 @@ def test_background_replay_and_shader_catalog_have_no_foreground_lane_fallback()
     assert foreground_calls == []
 
     shader_catalog = _function_source("_begin_export_shader_catalog")
-    assert "SHADER_CATALOG_REPLAY_TAG_PREFIX + job_id, callback" in shader_catalog
+    assert "callback, SHADER_CATALOG_REPLAY_TAG_PREFIX + job_id" in shader_catalog
     assert "except TypeError" not in shader_catalog
 
 
@@ -756,7 +756,7 @@ def test_chat_context_waits_for_its_project_restore_rollback(tmp_path, monkeypat
     bridge.QtCore = types.SimpleNamespace(QTimer=types.SimpleNamespace(
         singleShot=lambda _, callback: timers.append(callback)))
     bridge._ctx = types.SimpleNamespace(Replay=lambda: types.SimpleNamespace(
-        AsyncInvoke=lambda tag, callback: queued.append((tag, callback))))
+        AsyncInvoke=lambda method, tag: queued.append((method, tag))))
     bridge._capture_current_renderdoc_context_facts = lambda **_: (
         {"capture": {"loaded": True, "captureSessionId": session}, "events": {"currentEventId": 77}},
         (), ("loaded", "test"), 77)
@@ -767,6 +767,8 @@ def test_chat_context_waits_for_its_project_restore_rollback(tmp_path, monkeypat
     # Project Host context queries use this same primitive without the chat flag.
     bridge._begin_current_context_freeze(expected_capture_session_id=session)
     assert len(queued) == 1 and not cancelled
+    assert callable(queued[0][0])
+    assert queued[0][1].startswith(bridge.CURRENT_CONTEXT_FREEZE_REPLAY_TAG_PREFIX)
     queued.clear()
     job = json.loads(bridge.begin_native_context_freeze_json(expected_capture_session_id=session))
     assert job["status"] == "queued" and len(cancelled) == 1 and not queued

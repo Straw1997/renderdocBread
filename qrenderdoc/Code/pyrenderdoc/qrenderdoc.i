@@ -115,6 +115,9 @@ TEMPLATE_FIXEDARRAY_DECLARE(rdcfixedarray);
     PyObject *resultobj = 0;
     ICaptureViewer *result = 0;
 
+    if(!SWIG_Python_UnpackTuple(args, "new_CaptureViewer", 0, 0, 0))
+      return -1;
+
     result = new PythonCaptureViewer(self);
     resultobj = SWIG_NewPointerObj(SWIG_as_voidptr(result), SWIGTYPE_p_ICaptureViewer, SWIG_BUILTIN_INIT | 0);
     return Py_IsNone(resultobj) ? -1 : 0;
@@ -169,9 +172,10 @@ SWIGPY_DESTRUCTOR_CLOSURE(capviewer_deinit) /* defines capviewer_deinit_destruct
 %include <stdint.i>
 
 %include "Code/Interface/QRDInterface.h"
-%include "Code/Interface/PersistantConfig.h"
+%include "Code/Interface/PersistentConfig.h"
 %include "Code/Interface/RemoteHost.h"
 %include "Code/Interface/Extensions.h"
+%include "Code/Interface/Helpers.h"
 
 DOCUMENT("");
 
@@ -183,7 +187,9 @@ TEMPLATE_ARRAY_INSTANTIATE(rdcarray, BugReport)
 TEMPLATE_ARRAY_INSTANTIATE(rdcarray, ExtensionMetadata)
 TEMPLATE_ARRAY_INSTANTIATE(rdcarray, DialogButton)
 TEMPLATE_ARRAY_INSTANTIATE(rdcarray, RemoteHost)
+TEMPLATE_ARRAY_INSTANTIATE(rdcarray, ConnectedTempCapture)
 TEMPLATE_ARRAY_INSTANTIATE_PTR(rdcarray, ICaptureViewer)
+TEMPLATE_ARRAY_INSTANTIATE(rdcarray, ParseError)
 
 // unignore the function from above
 %rename("%s") IReplayManager::BlockInvokeTagged;
@@ -198,10 +204,10 @@ This entry point is intended for a non-UI worker that must wait for a replay res
 without blocking qrenderdoc's event loop.
 
 :param str tag: The tag used to order this callback.
-:param InvokeCallback method: The function to callback on the replay thread.
-  Callback function signature must match :func:`InvokeCallback`.
+:param ReplayInvokeCallback method: The function to callback on the replay thread.
+  Callback function signature must match :func:`ReplayInvokeCallback`.
 )");
-  void BlockInvokeTagged(const rdcstr &tag, InvokeCallback m) {
+  void BlockInvokeTagged(const rdcstr &tag, ReplayInvokeCallback m) {
     PyObject *global_internal_handle = NULL;
 
     PyObject *globals = PyEval_GetGlobals();
@@ -219,10 +225,10 @@ without blocking qrenderdoc's event loop.
 
   DOCUMENT(R"(Make a blocking invoke call onto the replay thread.
 
-:param InvokeCallback method: The function to callback on the replay thread.
-  Callback function signature must match :func:`InvokeCallback`.
+:param ReplayInvokeCallback method: The function to callback on the replay thread.
+  Callback function signature must match :func:`ReplayInvokeCallback`.
 )");
-  void BlockInvoke(InvokeCallback m) {
+  void BlockInvoke(ReplayInvokeCallback m) {
     PyObject *global_internal_handle = NULL;
 
     PyObject *globals = PyEval_GetGlobals();

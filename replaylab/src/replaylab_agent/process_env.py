@@ -59,6 +59,7 @@ SAFE_EXTERNAL_ENV = frozenset(
 # code remains responsible for returning only redacted fingerprints.
 MCP_HOST_PROVIDER_ENV = frozenset(
     {
+        "BREAD_UNREAL_EDITOR_PYTHON",
         "REPLAYLAB_INSTANCE_ID",
         "REPLAYLAB_RUNTIME_DIR",
         "REPLAYLAB_INTERNAL_RUNTIME_DIR",

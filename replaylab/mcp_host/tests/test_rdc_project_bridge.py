@@ -150,16 +150,10 @@ class _Replay:
     def BlockInvoke(self, callback):
         callback(self.controller)
 
-    def AsyncInvoke(self, *args):
-        if len(args) == 1:
-            tag = ""
-            callback = args[0]
-        elif len(args) == 2:
-            tag, callback = args
-        else:
-            raise TypeError("AsyncInvoke expects callback or tag, callback")
+    def AsyncInvoke(self, method, tag=""):
+        assert callable(method) and isinstance(tag, str)
         self.async_tags.append(tag)
-        self._async_queue.append(callback)
+        self._async_queue.append(method)
         if self._draining_async:
             return
         self._draining_async = True
@@ -1548,7 +1542,7 @@ class ReplayLabRdcProjectBridgeTests(unittest.TestCase):
     def test_inventory_replay_callback_defers_symbol_commit_until_gui_poll(self):
         callbacks = []
         self.bridge._ctx.replay.AsyncInvoke = (
-            lambda tag, callback: callbacks.append((tag, callback)))
+            lambda callback, tag: callbacks.append((tag, callback)))
 
         queued = self.bridge._begin_rdc_project_shader_resource_index(
             self._inventory_request(discover_anchors=False)
@@ -1608,7 +1602,7 @@ class ReplayLabRdcProjectBridgeTests(unittest.TestCase):
 
         self.controller.GetShaderEntryPoints = get_entries
         self.bridge._ctx.replay.AsyncInvoke = (
-            lambda tag, callback: callbacks.append((tag, callback)))
+            lambda callback, tag: callbacks.append((tag, callback)))
 
         queued = self.bridge._begin_rdc_project_shader_resource_index(
             self._inventory_request(discover_anchors=False)
@@ -1664,7 +1658,7 @@ class ReplayLabRdcProjectBridgeTests(unittest.TestCase):
         callbacks = []
         calls = []
 
-        def queue_slice(tag, callback):
+        def queue_slice(callback, tag):
             calls.append(("queue", tag))
             callbacks.append((tag, callback))
 
@@ -1818,7 +1812,7 @@ class ReplayLabRdcProjectBridgeTests(unittest.TestCase):
 
         callbacks = []
         self.bridge._ctx.replay.AsyncInvoke = (
-            lambda tag, callback: callbacks.append((tag, callback)))
+            lambda callback, tag: callbacks.append((tag, callback)))
         queued = self.bridge._begin_rdc_project_shader_resource_index(
             self._inventory_request(discover_anchors=True)
         )
@@ -1887,7 +1881,7 @@ class ReplayLabRdcProjectBridgeTests(unittest.TestCase):
 
         self.controller.GetShaderEntryPoints = get_entries
         self.bridge._ctx.replay.AsyncInvoke = (
-            lambda tag, callback: callbacks.append((tag, callback)))
+            lambda callback, tag: callbacks.append((tag, callback)))
 
         queued = self.bridge._begin_rdc_project_shader_resource_index(
             self._inventory_request(discover_anchors=False)
@@ -1920,7 +1914,7 @@ class ReplayLabRdcProjectBridgeTests(unittest.TestCase):
 
         self.controller.GetShaderEntryPoints = get_entries
         self.bridge._ctx.replay.AsyncInvoke = (
-            lambda tag, callback: callbacks.append((tag, callback)))
+            lambda callback, tag: callbacks.append((tag, callback)))
 
         queued = self.bridge._begin_rdc_project_shader_resource_index(
             self._inventory_request(discover_anchors=False)
@@ -2107,7 +2101,7 @@ class ReplayLabRdcProjectBridgeTests(unittest.TestCase):
 
     def test_job_timeout_ttl_and_capture_change_fail_closed(self):
         replay = self.bridge._ctx.replay
-        replay.AsyncInvoke = lambda unused_tag, unused_callback: None
+        replay.AsyncInvoke = lambda unused_callback, unused_tag: None
         queued = self._begin()
         job = self.bridge._project_shader_index_jobs[queued["jobId"]]
         job["createdMonotonic"] -= (
@@ -2134,7 +2128,7 @@ class ReplayLabRdcProjectBridgeTests(unittest.TestCase):
         with self.bridge._project_shader_index_jobs_guard:
             self.bridge._project_shader_index_jobs.clear()
         replay.AsyncInvoke = (
-            lambda unused_tag, callback: callback(self.controller))
+            lambda callback, unused_tag: callback(self.controller))
         completed = self._begin()
         self.bridge._capture_session_id = "6" * 32
         with self.assertRaisesRegex(RuntimeError, "capture session changed"):

@@ -872,9 +872,10 @@ class McpContractTests(unittest.TestCase):
             capture_token = ("loaded", os.path.normcase(capture_path))
 
             class Replay:
-                def AsyncInvoke(self, tag, callback):
+                def AsyncInvoke(self, method, tag=""):
+                    assert callable(method) and isinstance(tag, str)
                     self.tag = tag
-                    callbacks.append(callback)
+                    callbacks.append(method)
 
             class Context:
                 def IsCaptureLoaded(self):

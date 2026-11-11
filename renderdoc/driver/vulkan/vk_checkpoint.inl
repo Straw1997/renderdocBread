@@ -512,7 +512,7 @@ static bool VulkanReplayReserveAttachmentSnapshot(uint64_t framebufferSlots, uin
   return true;
 }
 
-void WrappedVulkan::RecordReplayCheckpointAttachments(VulkanActionTreeNode &action,
+void WrappedVulkan::RecordReplayCheckpointAttachments(VulkanEventNode &action,
                                                       const VulkanRenderState &state)
 {
   if(!m_ReplayBindingEvidenceBudget.complete)
@@ -559,11 +559,11 @@ void WrappedVulkan::RecordReplayCheckpointAttachments(VulkanActionTreeNode &acti
         std::make_shared<const rdcarray<ResourceId>>(std::move(attachments));
 }
 
-void WrappedVulkan::RecordReplayCheckpointSubmittedWrites(const VulkanActionTreeNode &action)
+void WrappedVulkan::RecordReplayCheckpointSubmittedWrites(const VulkanEventNode &action,
+                                                          uint32_t event)
 {
   if(!m_CheckpointPhysicalWritesComplete)
     return;
-  const uint32_t event = action.action.eventId;
   auto record = [&](ResourceId id) {
     if(id == ResourceId())
       return;

@@ -26,6 +26,7 @@
 #include <QApplication>
 #include <QMutexLocker>
 #include <QProgressDialog>
+#include "Code/pyrenderdoc/PythonContext.h"
 #include "CaptureContext.h"
 #include "QRDUtils.h"
 
@@ -78,7 +79,11 @@ void ReplayManager::OpenCapture(const QString &capturefile, const ReplayOptions 
   int proxyRenderer = -1;
 
   m_Thread = new LambdaThread([this, proxyRenderer, capturefile, opts, progress]() {
+    PythonContext::AddDebuggableThread();
+
     run(proxyRenderer, capturefile, opts, progress);
+
+    PythonContext::RemoveDebuggableThread();
   });
   m_Thread->setName(lit("ReplayManager"));
   m_Thread->start(QThread::HighestPriority);
@@ -270,7 +275,7 @@ QString ReplayManager::GetCurrentProcessingTag()
   return m_CommandTag;
 }
 
-void ReplayManager::AsyncInvoke(const rdcstr &tag, ReplayManager::InvokeCallback m)
+void ReplayManager::AsyncInvoke(ReplayManager::ReplayInvokeCallback m, rdcstr tag)
 {
   QString qtag;
 
@@ -284,14 +289,6 @@ void ReplayManager::AsyncInvoke(const rdcstr &tag, ReplayManager::InvokeCallback
   // replacement, two producer threads can both finish their removal pass and then enqueue stale
   // work after the newer request.
   PushInvoke(cmd, !qtag.isEmpty());
-}
-
-void ReplayManager::AsyncInvoke(ReplayManager::InvokeCallback m)
-{
-  InvokeHandle *cmd = new InvokeHandle(m);
-  cmd->selfdelete = true;
-
-  PushInvoke(cmd);
 }
 
 bool ReplayManager::HasPendingForegroundInvoke()
@@ -328,24 +325,42 @@ bool ReplayManager::HasPendingNonBackgroundInvoke()
   return false;
 }
 
-void ReplayManager::BlockInvokeTagged(const rdcstr &tag, ReplayManager::InvokeCallback m)
+void ReplayManager::BlockInvokeTagged(const rdcstr &tag, ReplayInvokeCallback m)
 {
+  if(IsRunning() && m_Thread->isCurrentThread())
+  {
+    m(m_Renderer);
+    return;
+  }
+
   InvokeHandle *cmd = new InvokeHandle(m, tag);
 
   PushInvoke(cmd);
 
+  void *ctx = PythonContext::PausePythonThreading();
   cmd->processed.acquire();
+  PythonContext::ResumePythonThreading(ctx);
 
   delete cmd;
 }
 
-void ReplayManager::BlockInvoke(ReplayManager::InvokeCallback m)
+void ReplayManager::BlockInvoke(ReplayManager::ReplayInvokeCallback m)
 {
+  if(IsRunning() && m_Thread->isCurrentThread())
+  {
+    m(m_Renderer);
+    return;
+  }
+
   InvokeHandle *cmd = new InvokeHandle(m);
 
   PushInvoke(cmd);
 
+  void *ctx = PythonContext::PausePythonThreading();
+
   cmd->processed.acquire();
+
+  PythonContext::ResumePythonThreading(ctx);
 
   delete cmd;
 }
@@ -365,6 +380,8 @@ void ReplayManager::CloseThread()
 
   if(m_Thread == NULL)
     return;
+
+  void *ctx = PythonContext::PausePythonThreading();
 
   // Give normal renderer shutdown a bounded grace period. If a driver call is stuck we must not
   // terminate the replay thread or destroy its resources underneath it, but we also must not burn a
@@ -390,6 +407,8 @@ void ReplayManager::CloseThread()
 
   m_Thread->deleteLater();
   m_Thread = NULL;
+
+  PythonContext::ResumePythonThreading(ctx);
 }
 
 ResultDetails ReplayManager::ConnectToRemoteServer(RemoteHost host)

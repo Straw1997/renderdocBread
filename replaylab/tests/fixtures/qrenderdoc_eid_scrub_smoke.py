@@ -186,7 +186,7 @@ class _ScrubSmokeRunner(object):
                 self.queue_result["gateTimedOut"] = True
             self.gate_exited.set()
 
-        pyrenderdoc.Replay().AsyncInvoke("eid-scrub-smoke-gate", occupy_replay)
+        pyrenderdoc.Replay().AsyncInvoke(occupy_replay, "eid-scrub-smoke-gate")
         self.phase = "gate"
 
     def issue_inputs(self):
@@ -260,7 +260,7 @@ class _ScrubSmokeRunner(object):
             finally:
                 self.drained.set()
 
-        pyrenderdoc.Replay().AsyncInvoke("eid-scrub-smoke-sentinel", after_publication)
+        pyrenderdoc.Replay().AsyncInvoke(after_publication, "eid-scrub-smoke-sentinel")
         self.phase = phase
 
     def verify_checkpoint(self):

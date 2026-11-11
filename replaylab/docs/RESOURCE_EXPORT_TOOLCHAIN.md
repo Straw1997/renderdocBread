@@ -6,6 +6,14 @@ glTF 2.0 JSON document plus its binary buffer. GLB and FBX are optional future
 provider derivatives because neither container can represent every captured
 vertex input, descriptor view, sampler, CBuffer, Shader, or pass dependency.
 
+## On-demand Unreal restoration
+
+The Unreal destination reuses the same finalized capture evidence and glTF.
+See [Unreal restoration](../mcp_host/docs/UNREAL_RESTORATION.md) for the
+editable material/function/instance recipe, installed MCP or persistent stock
+Editor connection, compile preflight, regional HDR/tail statistics and continuous
+frame evidence review. These interfaces do not independently certify a restored effect.
+
 ## On-demand Unity restoration
 
 The preferred workflow prepares the effect in Bread first: decompile, organize

@@ -38,6 +38,7 @@
 #include "Code/TranslationManager.h"
 #include "Code/pyrenderdoc/PythonContext.h"
 #include "Windows/Dialogs/CrashDialog.h"
+#include "Windows/Dialogs/UpdateDialog.h"
 #include "Windows/MainWindow.h"
 #include "version.h"
 
@@ -185,6 +186,12 @@ int main(int argc, char *argv[])
 
   qInstallMessageHandler(sharedLogOutput);
 
+  if(BreadRelease::InstallationInProgress())
+  {
+    qInfo() << "RenderDocBread is applying an update. The installer will restart it.";
+    return 0;
+  }
+
   // there seems to be a persistent crash in QWidgetPrivate::subtractOpaqueSiblings where a widget
   // has no parent but is not a window. Try to work around it by setting this env var, as it's only
   // an optimisation
@@ -283,7 +290,8 @@ int main(int argc, char *argv[])
 
     {
       QCoreApplication application(argc, mod_argv);
-      PythonContext::GlobalInit();
+      PersistentConfig cfg;
+      PythonContext::GlobalInit(cfg);
 
       logstream << "Checking python binding consistency.\n";
 
@@ -538,7 +546,7 @@ int main(int argc, char *argv[])
   RegisterMetatypeConversions();
 
   {
-    PersistantConfig config;
+    PersistentConfig config;
 
     // ConfigFilePath validates and creates an explicit isolation root before any UI settings are
     // loaded. Do not create the normal AppData directory when this process requested isolation.
@@ -667,7 +675,7 @@ int main(int argc, char *argv[])
     }
     else
     {
-      PythonContext::GlobalInit();
+      PythonContext::GlobalInit(config);
 
       if(updateApplied)
       {
@@ -706,34 +714,31 @@ int main(int argc, char *argv[])
 
         ANALYTIC_SET(UIFeatures.PythonInterop, true);
 
-        py.ctx().setGlobal("pyrenderdoc", (ICaptureContext *)&ctx);
+        QObject::connect(&py.ctx(), &PythonContext::exception,
+                         [&pythonExited](const QString &, const QString &type, const QString &value,
+                                         int, QList<QString> frames) {
+                           if(type == lit("SystemExit"))
+                           {
+                             pythonExited = true;
+                             return;
+                           }
 
-        QObject::connect(
-            &py.ctx(), &PythonContext::exception,
-            [&pythonExited](const QString &type, const QString &value, int, QList<QString> frames) {
-              if(type == lit("SystemExit"))
-              {
-                pythonExited = true;
-                return;
-              }
+                           QString exString;
 
-              QString exString;
+                           if(!frames.isEmpty())
+                           {
+                             exString += QApplication::translate(
+                                 "qrenderdoc", "Traceback (most recent call last):\n");
+                             for(const QString &f : frames)
+                               exString += QFormatStr("  %1\n").arg(f);
+                           }
+                           exString += QFormatStr("%1: %2\n").arg(type).arg(value);
 
-              if(!frames.isEmpty())
-              {
-                exString += QApplication::translate(
-                    "qrenderdoc", "Traceback (most recent call last):\n");
-                for(const QString &f : frames)
-                  exString += QFormatStr("  %1\n").arg(f);
-              }
-
-              exString += QFormatStr("%1: %2\n").arg(type).arg(value);
-
-              qCritical("%s", exString.toUtf8().data());
-            });
+                           qCritical("%s", exString.toUtf8().data());
+                         });
 
         QObject::connect(&py.ctx(), &PythonContext::textOutput,
-                         [](bool isStdError, const QString &output) {
+                         [](const QString &, bool isStdError, const QString &output) {
                            if(isStdError)
                              qCritical("%s", output.toUtf8().data());
                            else

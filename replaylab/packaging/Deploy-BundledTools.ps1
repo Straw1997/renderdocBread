@@ -24,12 +24,15 @@ if (-not (Test-Path -LiteralPath $BundleRoot)) {
     Write-Host "no bundle at $BundleRoot (run replaylab\third_party\unpackers\Fetch-Unpackers.cmd first); nothing to deploy"
     exit 0
 }
-$target = Join-Path $runtime "tools\unpackers"
-New-Item -ItemType Directory -Force -Path $target | Out-Null
-
 # _src holds checkouts used to build; it is never shipped.
 $kinds = Get-ChildItem -LiteralPath $BundleRoot -Directory |
     Where-Object { $_.Name -ne "_src" -and -not $_.Name.StartsWith(".") }
+if (-not $kinds) {
+    Write-Host "Unpacker deployment requires staged tool payloads at $BundleRoot."
+    exit 0
+}
+$target = Join-Path $runtime "tools\unpackers"
+New-Item -ItemType Directory -Force -Path $target | Out-Null
 foreach ($kind in $kinds) {
     $destination = Join-Path $target $kind.Name
     $targetPrefix = [IO.Path]::GetFullPath($target).TrimEnd('\') + '\'

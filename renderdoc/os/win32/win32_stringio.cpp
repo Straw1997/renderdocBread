@@ -329,9 +329,9 @@ rdcstr GetReplayAppFilename()
     return exe;
   }
 
-  // if qrenderdoc.exe doesn't live in the same dir, we must be in x86/
+  // if the replay application doesn't live in the same dir, we must be in x86/
   // so look one up the tree.
-  exe = path + "/../qrenderdoc.exe";
+  exe = path + "/../q_render_soco_doc.exe";
 
   f = FileIO::fopen(exe, FileIO::ReadBinary);
   if(f)

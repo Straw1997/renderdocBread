@@ -166,7 +166,7 @@ class _Validator(object):
 
         self.phase = name
         self.deadline = time.monotonic() + 180.0
-        pyrenderdoc.Replay().AsyncInvoke("eid-cbuffer-" + name, work)
+        pyrenderdoc.Replay().AsyncInvoke(work, "eid-cbuffer-" + name)
 
     def prepare(self):
         self.original = (int(pyrenderdoc.CurSelectedEvent()), int(pyrenderdoc.CurEvent()))

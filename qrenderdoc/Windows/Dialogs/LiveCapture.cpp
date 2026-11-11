@@ -181,57 +181,32 @@ LiveCapture::LiveCapture(ICaptureContext &ctx, const QString &hostname, const QS
 
     ui->mainLayout->addWidget(bottomTools);
   }
-
-  {
-    m_ButtonColorTimer = new QTimer(this);
-    connect(m_ButtonColorTimer, &QTimer::timeout, this, [this]() {
-      // Advance hue while keeping saturation and lightness unchanged.
-      this->m_ButtonColorHue = (this->m_ButtonColorHue + 1) % 360;    // hue range is 0..359
-      QColor color;
-      color.setHsl(this->m_ButtonColorHue, 255, 128);
-
-      QColor inverseColor;
-      inverseColor.setHsl((this->m_ButtonColorHue + 180) % 360, 255, 128);
-      // i18n-ignore: Qt stylesheet program data; it contains no user-visible text.
-      this->ui->triggerImmediateCapture->setStyleSheet(
-          lit(R"(QPushButton {
-                            background: %1;
-                            color: %2;
-                            font-size: 18px;
-                            font-weight: bold;
-                            border-radius: 10px;
-                            border: 2px solid %2;
-                            padding: 10px 20px;
-                        }
-
-                        QPushButton:hover {
-                            background: %2;
-                            border: 2px solid %1;
-                            color: %1;
-                        }
-
-                        QPushButton:pressed {
-                            background: #FF8C00; /* orange-red while pressed */
-                            border: 2px solid #FF4500; /* darker pressed border */
-                        }
-
-        )")
-          .arg(color.name())
-          .arg(inverseColor.name()));
-    });
-    m_ButtonColorTimer->start(16);
-  }
 }
 
 LiveCapture::~LiveCapture()
 {
+  for(ClosedCallback cb : m_CloseCallbacks)
+    cb(this);
+
   m_Main->LiveCaptureClosed(this);
 
   cleanItems();
   killThread();
 
   delete ui;
-  delete m_ButtonColorTimer;
+}
+
+bool LiveCapture::IsConnected()
+{
+  return m_Connected.available();
+}
+
+rdcarray<rdcstr> LiveCapture::GetAPIs()
+{
+  rdcarray<rdcstr> ret;
+  for(QString api : m_APIs.keys())
+    ret.push_back(api);
+  return ret;
 }
 
 void LiveCapture::QueueCapture(int frameNumber, int numFrames)
@@ -239,6 +214,112 @@ void LiveCapture::QueueCapture(int frameNumber, int numFrames)
   m_QueueCaptureFrameNum = frameNumber;
   m_CaptureNumFrames = numFrames;
   m_QueueCapture.release();
+}
+
+void LiveCapture::TimedCapture(float secondsDelay, int numFrames)
+{
+  ui->captureDelay->setValue(qMax(0.0f, secondsDelay));
+  ui->numFrames->setValue(qMax(0.0f, float(numFrames)));
+
+  on_triggerDelayedCapture_clicked();
+}
+
+void LiveCapture::CycleActiveWindow()
+{
+  on_cycleActiveWindow_clicked();
+}
+
+void LiveCapture::Close(bool discardUnsaved)
+{
+  if(!discardUnsaved)
+  {
+    if(!checkAllowClose())
+      return;
+  }
+
+  cleanItems();
+}
+
+rdcarray<ConnectedTempCapture> LiveCapture::GetCaptures()
+{
+  rdcarray<ConnectedTempCapture> ret;
+  ret.reserve(m_Captures.size());
+  for(Capture *src : m_Captures)
+  {
+    ConnectedTempCapture dst;
+    dst.captureID = src->remoteID;
+    dst.api = src->api;
+    dst.timestamp = src->timestamp;
+    dst.frameNumber = src->frameNumber;
+    ret.push_back(dst);
+  }
+  return ret;
+}
+
+void LiveCapture::OpenCapture(uint32_t ID)
+{
+  for(Capture *c : m_Captures)
+  {
+    if(c->remoteID == ID)
+    {
+      openCapture(c);
+      return;
+    }
+  }
+}
+
+void LiveCapture::DeleteCapture(uint32_t ID, bool promptForSave)
+{
+  for(Capture *c : m_Captures)
+  {
+    if(c->remoteID == ID)
+    {
+      deleteCapture(c);
+      return;
+    }
+  }
+}
+
+void LiveCapture::SaveCapture(uint32_t ID, rdcstr filename)
+{
+  for(Capture *c : m_Captures)
+  {
+    if(c->remoteID == ID)
+    {
+      saveCapture(c, filename);
+      return;
+    }
+  }
+}
+
+rdcarray<uint32_t> LiveCapture::GetChildProcesses()
+{
+  rdcarray<uint32_t> ret;
+
+  QMutexLocker l(&m_ChildrenLock);
+  ret.reserve(m_Children.size());
+  for(const ChildProcess &c : m_Children)
+    ret.push_back(c.PID);
+
+  return ret;
+}
+
+ICaptureConnection *LiveCapture::ConnectToChild(uint32_t pid)
+{
+  QMutexLocker l(&m_ChildrenLock);
+
+  for(const ChildProcess &c : m_Children)
+  {
+    if(c.PID == pid)
+    {
+      LiveCapture *live =
+          new LiveCapture(m_Ctx, m_Hostname, m_HostFriendlyname, c.ident, m_Main, m_Main);
+      m_Main->ShowLiveCapture(live);
+      return live;
+    }
+  }
+
+  return NULL;
 }
 
 void LiveCapture::showEvent(QShowEvent *event)
@@ -350,7 +431,7 @@ void LiveCapture::on_triggerDelayedCapture_clicked()
     m_CaptureCounter = (int)ui->captureDelay->value();
     countdownTimer.start();
     ui->triggerDelayedCapture->setEnabled(false);
-    ui->triggerDelayedCapture->setText(tr("Triggering in %1s").arg(m_CaptureCounter));
+    ui->triggerDelayedCapture->setText(tr("Capturing in %1s").arg(m_CaptureCounter));
   }
 }
 
@@ -447,36 +528,7 @@ void LiveCapture::deleteCapture_triggered()
   {
     Capture *cap = GetCapture(item);
 
-    if(!cap->saved)
-    {
-      if(cap->path == m_Ctx.GetCaptureFilename())
-      {
-        m_Main->takeCaptureOwnership();
-        m_Main->CloseCapture();
-      }
-      else
-      {
-        // if connected, prefer using the live connection
-        if(m_Connected.available() && !cap->local)
-        {
-          QMutexLocker l(&m_DeleteCapturesLock);
-          m_DeleteCaptures.push_back(cap->remoteID);
-        }
-        else
-        {
-          m_Ctx.Replay().DeleteCapture(cap->path, cap->local);
-        }
-
-        if(cap->local)
-        {
-          m_Main->RemoveRecentCapture(cap->path);
-        }
-      }
-    }
-
-    delete cap;
-
-    delete ui->captures->takeItem(ui->captures->row(item));
+    deleteCapture(cap);
   }
 }
 
@@ -592,13 +644,13 @@ void LiveCapture::captureCountdownTick()
   {
     m_CaptureNumFrames = (int)ui->numFrames->value();
     ui->triggerDelayedCapture->setEnabled(true);
-    ui->triggerDelayedCapture->setText(tr("Trigger After Delay"));
+    ui->triggerDelayedCapture->setText(tr("Capture After Delay"));
     m_TriggerCapture.release();
   }
   else
   {
     countdownTimer.start();
-    ui->triggerDelayedCapture->setText(tr("Triggering in %1s").arg(m_CaptureCounter));
+    ui->triggerDelayedCapture->setText(tr("Capturing in %1s").arg(m_CaptureCounter));
   }
 }
 
@@ -1003,6 +1055,50 @@ bool LiveCapture::saveCapture(Capture *cap, QString path)
   return true;
 }
 
+void LiveCapture::deleteCapture(Capture *cap)
+{
+  if(!cap->saved)
+  {
+    if(cap->path == m_Ctx.GetCaptureFilename())
+    {
+      m_Main->takeCaptureOwnership();
+      m_Ctx.CloseCapture();
+    }
+    else
+    {
+      // if connected, prefer using the live connection
+      if(m_Connected.available() && !cap->local)
+      {
+        QMutexLocker l(&m_DeleteCapturesLock);
+        m_DeleteCaptures.push_back(cap->remoteID);
+      }
+      else
+      {
+        m_Ctx.Replay().DeleteCapture(cap->path, cap->local);
+      }
+
+      if(cap->local)
+      {
+        m_Main->RemoveRecentCapture(cap->path);
+      }
+    }
+  }
+
+  m_Captures.removeOne(cap);
+  delete cap;
+
+  for(int row = 0; row < ui->captures->count(); row++)
+  {
+    QListWidgetItem *item = ui->captures->item(row);
+
+    if(GetCapture(item) == cap)
+    {
+      delete ui->captures->takeItem(row);
+      break;
+    }
+  }
+}
+
 void LiveCapture::cleanItems()
 {
   for(int i = 0; i < ui->captures->count(); i++)
@@ -1035,6 +1131,7 @@ void LiveCapture::cleanItems()
       }
     }
 
+    m_Captures.removeOne(cap);
     delete cap;
   }
   ui->captures->clear();
@@ -1220,6 +1317,8 @@ void LiveCapture::captureAdded(const QString &name, const NewCaptureData &newCap
   AddCapture(item, cap);
 
   ui->captures->addItem(item);
+
+  m_Captures.push_back(cap);
 }
 
 void LiveCapture::connectionClosed()
@@ -1252,6 +1351,11 @@ void LiveCapture::connectionClosed()
         return;
 
       openCapture(cap);
+
+      // if the capture failed to load, don't proceed.
+      if(!m_Ctx.IsCaptureLoaded())
+        return;
+
       if(!cap->saved)
       {
         cap->saved = true;
@@ -1259,10 +1363,19 @@ void LiveCapture::connectionClosed()
       }
     }
 
+    int childCount = 0;
+    uint32_t ident0 = 0;
+    {
+      QMutexLocker l(&m_ChildrenLock);
+      childCount = m_Children.count();
+      if(childCount > 0)
+        ident0 = m_Children[0].ident;
+    }
+
     // auto-close and load capture if we got a capture. If we
     // don't have any captures but DO have child processes,
     // then don't close just yet.
-    if(ui->captures->count() == 1 || m_Children.count() == 0)
+    if(ui->captures->count() == 1 || childCount == 0)
     {
       // raise the texture viewer if it exists, instead of falling back to most likely the capture
       // executable dialog which is not useful.
@@ -1275,10 +1388,9 @@ void LiveCapture::connectionClosed()
     // if we have no captures and only one child, close and
     // open up a connection to it (similar to behaviour with
     // only one capture
-    if(ui->captures->count() == 0 && m_Children.count() == 1)
+    if(ui->captures->count() == 0 && childCount == 1)
     {
-      LiveCapture *live =
-          new LiveCapture(m_Ctx, m_Hostname, m_HostFriendlyname, m_Children[0].ident, m_Main);
+      LiveCapture *live = new LiveCapture(m_Ctx, m_Hostname, m_HostFriendlyname, ident0, m_Main);
       m_Main->ShowLiveCapture(live);
       selfClose();
       return;
@@ -1288,6 +1400,9 @@ void LiveCapture::connectionClosed()
 
 void LiveCapture::selfClose()
 {
+  if(!m_SelfClosing)
+    return;
+
   if(m_ContextMenu)
   {
     qInfo() << "preventing race";
@@ -1338,6 +1453,8 @@ void LiveCapture::connectionThreadEntry()
       setTitle(QFormatStr("%1 [PID %2]").arg(target).arg(pid));
     else
       setTitle(target);
+
+    m_Target = target;
 
     ui->target->setText(windowTitle());
     ui->connectionIcon->setPixmap(Pixmaps::connect(ui->connectionIcon));

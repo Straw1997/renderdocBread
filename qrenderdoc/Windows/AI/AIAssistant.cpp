@@ -3504,59 +3504,107 @@ static const ProviderRuntimeTranslation taskRuntimeTranslations[] = {
      QT_TRANSLATE_NOOP3("AIAssistant", "Codex configured capabilities",
                         "task.capabilities.codex-configured")},
     {"task.capabilities.inherited",
-     QT_TRANSLATE_NOOP3("AIAssistant", "User-configured integrations and permissions are inherited. Only connected services are callable; new approval requests are not automatically accepted.",
-                        "task.capabilities.inherited")},
+     QT_TRANSLATE_NOOP3(
+         "AIAssistant",
+         "User-configured integrations and permissions are inherited. Only connected services are "
+         "callable; new approval requests are not automatically accepted.",
+         "task.capabilities.inherited")},
     {"task.provider.retry-capacity",
-     QT_TRANSLATE_NOOP3("AIAssistant", "Model capacity is temporarily unavailable. Continuing this session in %1 seconds (retry %2 of %3).", "task.provider.retry-capacity")},
+     QT_TRANSLATE_NOOP3("AIAssistant",
+                        "Model capacity is temporarily unavailable. Continuing this session in %1 "
+                        "seconds (retry %2 of %3).",
+                        "task.provider.retry-capacity")},
     {"task.provider.retry-session",
-     QT_TRANSLATE_NOOP3("AIAssistant", "The provider's account lookup timed out. Retrying in %1 seconds (%2 of %3).", "task.provider.retry-session")},
+     QT_TRANSLATE_NOOP3(
+         "AIAssistant",
+         "The provider's account lookup timed out. Retrying in %1 seconds (%2 of %3).",
+         "task.provider.retry-session")},
     {"task.provider.session-ready",
-     QT_TRANSLATE_NOOP3("AIAssistant", "Provider connection restored. Continuing the request.", "task.provider.session-ready")},
+     QT_TRANSLATE_NOOP3("AIAssistant", "Provider connection restored. Continuing the request.",
+                        "task.provider.session-ready")},
     {"task.error.provider-capacity",
-     QT_TRANSLATE_NOOP3("AIAssistant", "The selected model is temporarily at capacity. Retry later or choose another model; the task is unfinished.", "task.error.provider-capacity")},
+     QT_TRANSLATE_NOOP3("AIAssistant",
+                        "The selected model is temporarily at capacity. Retry later or choose "
+                        "another model; the task is unfinished.",
+                        "task.error.provider-capacity")},
     {"doctor.context-window-unknown",
-     QT_TRANSLATE_NOOP3("AIAssistant", "The context window for %1 is not published. Requests can still be sent; the server checks its actual context limit.", "doctor.context-window-unknown")},
+     QT_TRANSLATE_NOOP3("AIAssistant",
+                        "The context window for %1 is not published. Requests can still be sent; "
+                        "the server checks its actual context limit.",
+                        "doctor.context-window-unknown")},
     {"task.error.provider-rate-limit",
-     QT_TRANSLATE_NOOP3("AIAssistant", "The provider limited the request rate. Wait before continuing the unfinished task.", "task.error.provider-rate-limit")},
+     QT_TRANSLATE_NOOP3(
+         "AIAssistant",
+         "The provider limited the request rate. Wait before continuing the unfinished task.",
+         "task.error.provider-rate-limit")},
     {"task.error.provider-quota",
-     QT_TRANSLATE_NOOP3("AIAssistant", "The provider reports an exhausted usage or billing limit. Check the account quota before retrying.", "task.error.provider-quota")},
+     QT_TRANSLATE_NOOP3("AIAssistant",
+                        "The provider reports an exhausted usage or billing limit. Check the "
+                        "account quota before retrying.",
+                        "task.error.provider-quota")},
     {"task.error.provider-authentication",
-     QT_TRANSLATE_NOOP3("AIAssistant", "The provider rejected authentication. Check this connection's sign-in or API credential.", "task.error.provider-authentication")},
+     QT_TRANSLATE_NOOP3(
+         "AIAssistant",
+         "The provider rejected authentication. Check this connection's sign-in or API credential.",
+         "task.error.provider-authentication")},
     {"task.error.provider-permission",
-     QT_TRANSLATE_NOOP3("AIAssistant", "The provider denied access. Check account and model permissions for this connection.", "task.error.provider-permission")},
+     QT_TRANSLATE_NOOP3(
+         "AIAssistant",
+         "The provider denied access. Check account and model permissions for this connection.",
+         "task.error.provider-permission")},
     {"task.error.provider-model-unavailable",
-     QT_TRANSLATE_NOOP3("AIAssistant", "The configured model is unavailable. Refresh the model list and check the selected model.", "task.error.provider-model-unavailable")},
+     QT_TRANSLATE_NOOP3("AIAssistant",
+                        "The configured model is unavailable. Refresh the model list and check the "
+                        "selected model.",
+                        "task.error.provider-model-unavailable")},
     {"task.error.provider-timeout",
-     QT_TRANSLATE_NOOP3("AIAssistant", "The provider request timed out. Check the connection and continue from the saved task state.", "task.error.provider-timeout")},
+     QT_TRANSLATE_NOOP3("AIAssistant",
+                        "The provider request timed out. Check the connection and continue from "
+                        "the saved task state.",
+                        "task.error.provider-timeout")},
     {"task.error.provider-transport",
-     QT_TRANSLATE_NOOP3("AIAssistant", "The provider connection was interrupted. Check network and proxy settings before continuing.", "task.error.provider-transport")},
+     QT_TRANSLATE_NOOP3("AIAssistant",
+                        "The provider connection was interrupted. Check network and proxy settings "
+                        "before continuing.",
+                        "task.error.provider-transport")},
     {"task.error.provider-unavailable",
-     QT_TRANSLATE_NOOP3("AIAssistant", "The provider service is temporarily unavailable. Retry the unfinished task later.", "task.error.provider-unavailable")},
+     QT_TRANSLATE_NOOP3(
+         "AIAssistant",
+         "The provider service is temporarily unavailable. Retry the unfinished task later.",
+         "task.error.provider-unavailable")},
     {"task.error.provider-configuration",
-     QT_TRANSLATE_NOOP3("AIAssistant", "The provider rejected the connection or request configuration. Review the diagnostic details before retrying.", "task.error.provider-configuration")},
+     QT_TRANSLATE_NOOP3("AIAssistant",
+                        "The provider rejected the connection or request configuration. Review the "
+                        "diagnostic details before retrying.",
+                        "task.error.provider-configuration")},
     {"task.error.provider-context",
-     QT_TRANSLATE_NOOP3("AIAssistant", "The request exceeds the model context limit. Continue with a smaller context while preserving saved work.", "task.error.provider-context")},
+     QT_TRANSLATE_NOOP3("AIAssistant",
+                        "The request exceeds the model context limit. Continue with a smaller "
+                        "context while preserving saved work.",
+                        "task.error.provider-context")},
     {"task.error.provider-failed",
-     QT_TRANSLATE_NOOP3("AIAssistant", "The AI task failed. Review the diagnostic details; completion has not been confirmed.", "task.error.provider-failed")},
+     QT_TRANSLATE_NOOP3(
+         "AIAssistant",
+         "The AI task failed. Review the diagnostic details; completion has not been confirmed.",
+         "task.error.provider-failed")},
     {"task.error.provider-policy",
-     QT_TRANSLATE_NOOP3("AIAssistant", "The provider declined this request under its policy. Review the diagnostic details before changing the request.", "task.error.provider-policy")},
+     QT_TRANSLATE_NOOP3("AIAssistant",
+                        "The provider declined this request under its policy. Review the "
+                        "diagnostic details before changing the request.",
+                        "task.error.provider-policy")},
     {"task.owner-exited",
      QT_TRANSLATE_NOOP3("AIAssistant", "The application exited; the unfinished task was cancelled.",
                         "task.owner-exited")},
-    {"task.queued",
-     QT_TRANSLATE_NOOP3("AIAssistant", "Queued", "task.queued")},
+    {"task.queued", QT_TRANSLATE_NOOP3("AIAssistant", "Queued", "task.queued")},
     {"task.main.started",
-     QT_TRANSLATE_NOOP3("AIAssistant", "Main Agent is analysing the request",
-                        "task.main.started")},
+     QT_TRANSLATE_NOOP3("AIAssistant", "Main Agent is analysing the request", "task.main.started")},
     {"task.shader-review.started",
      QT_TRANSLATE_NOOP3("AIAssistant", "Reviewing organized Shader source",
                         "task.shader-review.started")},
     {"task.self-review.started",
-     QT_TRANSLATE_NOOP3("AIAssistant", "Reviewing task completion",
-                        "task.self-review.started")},
+     QT_TRANSLATE_NOOP3("AIAssistant", "Reviewing task completion", "task.self-review.started")},
     {"task.main.completed",
-     QT_TRANSLATE_NOOP3("AIAssistant", "Main Agent finished this turn",
-                        "task.main.completed")},
+     QT_TRANSLATE_NOOP3("AIAssistant", "Main Agent finished this turn", "task.main.completed")},
     {"task.child.started",
      QT_TRANSLATE_NOOP3("AIAssistant", "Child Agent started: %1", "task.child.started")},
     {"task.child.completed",
@@ -4409,8 +4457,7 @@ AIAssistant::AIAssistant(CaptureContext &ctx, QWidget *parent) : QFrame(parent),
   m_ConnectionStatusTimer = new QTimer(this);
   m_ConnectionStatusTimer->setSingleShot(true);
   m_ConnectionStatusTimer->setInterval(1000);
-  connect(m_ConnectionStatusTimer, &QTimer::timeout, this,
-          [this]() { refreshConnectionStatus(); });
+  connect(m_ConnectionStatusTimer, &QTimer::timeout, this, [this]() { refreshConnectionStatus(); });
 
   m_ConversationSaveTimer = new QTimer(this);
   m_ConversationSaveTimer->setSingleShot(true);
@@ -7445,17 +7492,18 @@ void AIAssistant::handleTranscriptLink(const QUrl &url)
         if(BufferViewer *viewer = qobject_cast<BufferViewer *>(m_Ctx.GetMeshPreview()->Widget()))
         {
           m_Ctx.AddDockWindow(viewer, DockReference::MainToolArea, this);
-          if(leaf.contains(QLatin1String("framing")) || leaf.contains(QLatin1String("selectionKeyData")))
+          if(leaf.contains(QLatin1String("framing")) ||
+             leaf.contains(QLatin1String("selectionKeyData")))
             viewer->setMeshEvidence(leaf.toVariantMap());
           else
           {
-          viewer->NavigateMeshUV(stageIndex, leaf.value(QLatin1String("channel")).toString(),
-                                 leaf.value(QLatin1String("pair")).toInt() == 1 ? 2 : 0, texture);
-          if(leaf.contains(QLatin1String("selectedVertices")))
-            viewer->NavigateMeshSelection(
-                leaf.value(QLatin1String("selectionMode")).toString(),
-                leaf.value(QLatin1String("selectedVertices")).toArray().toVariantList(),
-                leaf.value(QLatin1String("selectedElements")).toArray().toVariantList());
+            viewer->NavigateMeshUV(stageIndex, leaf.value(QLatin1String("channel")).toString(),
+                                   leaf.value(QLatin1String("pair")).toInt() == 1 ? 2 : 0, texture);
+            if(leaf.contains(QLatin1String("selectedVertices")))
+              viewer->NavigateMeshSelection(
+                  leaf.value(QLatin1String("selectionMode")).toString(),
+                  leaf.value(QLatin1String("selectedVertices")).toArray().toVariantList(),
+                  leaf.value(QLatin1String("selectedElements")).toArray().toVariantList());
           }
           m_Ctx.RaiseDockWindow(viewer);
           viewer->show();
@@ -7570,8 +7618,10 @@ void AIAssistant::handleTranscriptLink(const QUrl &url)
       request[QStringLiteral("line")] = line;
       request[QStringLiteral("column")] = column;
       request[QStringLiteral("symbol")] = query.queryItemValue(QStringLiteral("symbol"));
-      request[QStringLiteral("selectLine")] = query.queryItemValue(QStringLiteral("selectLine")) == QStringLiteral("1");
-      request[QStringLiteral("sourceSha256")] = query.queryItemValue(QStringLiteral("sourceSha256"));
+      request[QStringLiteral("selectLine")] =
+          query.queryItemValue(QStringLiteral("selectLine")) == QStringLiteral("1");
+      request[QStringLiteral("sourceSha256")] =
+          query.queryItemValue(QStringLiteral("sourceSha256"));
       QString error;
       const QString result = m_Ctx.ReplayLab().NavigateShaderSourceJSON(
           QString::fromUtf8(QJsonDocument(request).toJson(QJsonDocument::Compact)), &error);
@@ -7611,9 +7661,8 @@ void AIAssistant::handleTranscriptLink(const QUrl &url)
          (target == QLatin1String("resource") && eventScoped && m_Ctx.GetTexture(id)))
       {
         bool validEvent = true;
-        const uint32_t eid = eventScoped
-                                 ? query.queryItemValue(QLatin1String("eid")).toUInt(&validEvent)
-                                 : 0;
+        const uint32_t eid =
+            eventScoped ? query.queryItemValue(QLatin1String("eid")).toUInt(&validEvent) : 0;
         if(!m_Ctx.GetTexture(id) || (eventScoped && (!validEvent || !eid || !m_Ctx.GetAction(eid))))
         {
           appendSystem(tr("The link is not an allowed RenderDoc navigation target."), true);
@@ -8292,7 +8341,8 @@ QString AIAssistant::findAgentCLI() const
 {
   // A portable distribution must never pick a source venv, PATH executable or another install.
   const QDir application(QCoreApplication::applicationDirPath());
-  const QString bundled = application.filePath(lit("replaylab/replaylab-ai.exe"));    // i18n-ignore: fixed first-party executable path
+  const QString bundled = application.filePath(
+      lit("replaylab/replaylab-ai.exe"));    // i18n-ignore: fixed first-party executable path
   if(application.exists(lit("RenderDocBread.portable")))    // i18n-ignore: portable package marker
   {
     return QFileInfo(bundled).isFile() ? bundled : QString();
@@ -8303,7 +8353,8 @@ QString AIAssistant::findAgentCLI() const
 
   // A deployed runtime belongs to this application. Keep an explicit override for source tests.
   // i18n-ignore: fixed manifest path for the runtime deployed beside the GUI.
-  if(application.exists(lit("replaylab/replaylab-runtime-manifest.json")) && QFileInfo(bundled).isFile())
+  if(application.exists(lit("replaylab/replaylab-runtime-manifest.json")) &&
+     QFileInfo(bundled).isFile())
     return bundled;
 
   const QString appDir = QCoreApplication::applicationDirPath();

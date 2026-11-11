@@ -111,7 +111,8 @@ class BufferViewer : public QFrame, public IBufferViewer, public ICaptureViewer
 
   Q_PROPERTY(QVariant persistData READ persistData WRITE setPersistData DESIGNABLE false SCRIPTABLE false)
   Q_PROPERTY(QVariantMap meshEvidence READ meshEvidence DESIGNABLE false SCRIPTABLE false)
-  Q_PROPERTY(QString meshEvidenceRequest READ meshEvidenceRequest WRITE setMeshEvidenceRequest DESIGNABLE false SCRIPTABLE false)
+  Q_PROPERTY(QString meshEvidenceRequest READ meshEvidenceRequest WRITE setMeshEvidenceRequest
+                 DESIGNABLE false SCRIPTABLE false)
 
 public:
   explicit BufferViewer(ICaptureContext &ctx, bool meshview, QWidget *parent = 0);
@@ -125,7 +126,8 @@ public:
   void NavigateCBufferVariable(const QString &path, qint64 byteOffset, int component);
   void NavigateMeshUV(int stage, const QString &channel, int component, ResourceId texture);
   void NavigateMeshSelection(const QString &mode, const QVariantList &vertices,
-                             const QVariantList &elements = QVariantList(), const QString &packed = QString());
+                             const QVariantList &elements = QVariantList(),
+                             const QString &packed = QString());
   QVariantMap meshEvidence();
   void setMeshEvidence(const QVariantMap &request);
   QString meshEvidenceRequest() const;

@@ -139,7 +139,7 @@ void RDPreviewTooltip::hideTip()
   hide();
 }
 
-QSize RDPreviewTooltip::configureTip(QWidget *widget, QModelIndex idx, QString text)
+QSize RDPreviewTooltip::configureTip(QWidget *widget, QString text, QModelIndex idx)
 {
   ResourceId id = pipe->updateThumbnail(widget, idx);
   if(id != ResourceId())
@@ -158,7 +158,7 @@ QSize RDPreviewTooltip::configureTip(QWidget *widget, QModelIndex idx, QString t
   return minimumSizeHint();
 }
 
-void RDPreviewTooltip::showTip(QPoint pos)
+void RDPreviewTooltip::showTipAtPos(QPoint pos)
 {
   move(pos);
   resize(minimumSize());

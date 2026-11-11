@@ -341,7 +341,7 @@ private:
   ScintillaEdit *m_CurInstructionScintilla = NULL;
   QList<ScintillaEdit *> m_FileScintillas;
 
-  FindReplace *m_FindReplace;
+  FindReplace *m_FindReplace = NULL;
   QPointer<ScintillaEdit> m_FindEditor;
   QTimer *m_FindTimer = NULL;
 
@@ -469,10 +469,7 @@ private:
 
   const ShaderVariable *GetDebugVariable(const DebugVariableReference &r);
 
-  void ensureLineScrolled(ScintillaEdit *s, int i);
-
   void find(bool down);
-
   void updateEditState();
 
   enum StepMode

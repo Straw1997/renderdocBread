@@ -32,7 +32,8 @@
 Matrix4f Camera::MeshProjection(ICamera *camera, float aspect)
 {
   const Camera *cam = static_cast<Camera *>(camera);
-  if(!cam) return Matrix4f::Perspective(90.0f,0.1f,100000.0f,aspect);
+  if(!cam)
+    return Matrix4f::Perspective(90.0f, 0.1f, 100000.0f, aspect);
   std::lock_guard<std::mutex> lock(cam->m_Mutex);
   return Matrix4f::Perspective(cam ? cam->m_FieldOfView : 90.0f, cam ? cam->m_Near : 0.1f,
                                cam ? cam->m_Far : 100000.0f, aspect);
@@ -57,7 +58,8 @@ void Camera::RotateArcball(float ax, float ay, float bx, float by)
 
   float az = from.x * from.x + from.y * from.y;
   float bz = to.x * to.x + to.y * to.y;
-  if(!std::isfinite(az) || !std::isfinite(bz)) return;
+  if(!std::isfinite(az) || !std::isfinite(bz))
+    return;
 
   // keep the controls stable by rejecting very small movements.
   if(fabsf(az - bz) < 1e-5f)
@@ -83,14 +85,15 @@ void Camera::RotateArcball(float ax, float ay, float bx, float by)
     b.Normalise();
   }
 
-  const float dot = RDCMAX(-1.0f,RDCMIN(1.0f,a.Dot(b)));
+  const float dot = RDCMAX(-1.0f, RDCMIN(1.0f, a.Dot(b)));
   float angle = acosf(dot);
 
   Vec3f axis = a.Cross(b);
   if(axis.Length() < 1e-10f)
   {
-    if(dot > 0) return;
-    axis = a.Cross(fabsf(a.x) < .9f ? Vec3f(1,0,0) : Vec3f(0,1,0));
+    if(dot > 0)
+      return;
+    axis = a.Cross(fabsf(a.x) < .9f ? Vec3f(1, 0, 0) : Vec3f(0, 1, 0));
   }
   axis.Normalise();
 
@@ -102,7 +105,8 @@ void Camera::RotateArcball(float ax, float ay, float bx, float by)
 
 void Camera::SetTurntableRotation(float yaw, float pitch)
 {
-  if(!std::isfinite(yaw) || !std::isfinite(pitch)) return;
+  if(!std::isfinite(yaw) || !std::isfinite(pitch))
+    return;
   std::lock_guard<std::mutex> lock(m_Mutex);
   dirty = true;
   arcrot = Quatf::AxisAngle(Vec3f(0, 1, 0), yaw) * Quatf::AxisAngle(Vec3f(1, 0, 0), pitch);
@@ -136,7 +140,8 @@ void Camera::RotateMeshPreviewOrbit(float yaw, float pitch, bool inverted)
 
   orientation = Quatf::AxisAngle(worldUp, inverted ? -yaw : yaw) *
                 Quatf::AxisAngle(pitchAxis, pitch) * orientation;
-  const float inverseLength = 1.0f / sqrtf(orientation.w * orientation.w + orientation.v.Dot(orientation.v));
+  const float inverseLength =
+      1.0f / sqrtf(orientation.w * orientation.w + orientation.v.Dot(orientation.v));
   orientation.w *= inverseLength;
   orientation.v = orientation.v * inverseLength;
   dirty = true;

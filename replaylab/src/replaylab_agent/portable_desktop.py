@@ -97,7 +97,8 @@ def windows(action: str = "snapshot", window_id: int = 0, text: str = "", x: int
     """Windows snapshot/screenshot/focus/click/type. Prefer app APIs for structured work.
 
     Coordinates are physical pixels in the virtual desktop, including negative
-    monitor origins. Reinspect the screenshot after an input action.
+    monitor origins. Use window_id from a snapshot to bind input to the intended
+    foreground window. Reinspect the screenshot after an input action.
     """
     if sys.platform != "win32":
         raise RuntimeError("Windows desktop adapter requires Windows")
@@ -107,6 +108,12 @@ def windows(action: str = "snapshot", window_id: int = 0, text: str = "", x: int
     user.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
     user.IsWindowVisible.argtypes = [wintypes.HWND]
     user.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    user.GetForegroundWindow.restype = wintypes.HWND
+    user.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user.WindowFromPoint.argtypes = [wintypes.POINT]
+    user.WindowFromPoint.restype = wintypes.HWND
+    user.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+    user.GetAncestor.restype = wintypes.HWND
     try:
         user.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
     except (OSError, AttributeError):
@@ -118,11 +125,16 @@ def windows(action: str = "snapshot", window_id: int = 0, text: str = "", x: int
         data = io.BytesIO()
         ImageGrab.grab(all_screens=True).save(data, format="PNG")
         return Image(data=data.getvalue(), format="png")
+    if window_id and action in {"click", "type"} and user.GetForegroundWindow() != window_id:
+        raise RuntimeError("The selected window is no longer in the foreground; inspect it again")
     if action == "focus":
-        if not user.SetForegroundWindow(window_id):
+        if user.GetForegroundWindow() != window_id and not user.SetForegroundWindow(window_id):
             raise RuntimeError("Windows did not grant foreground focus")
     elif action == "click":
-        user.SetCursorPos(x, y)
+        if window_id and user.GetAncestor(user.WindowFromPoint(wintypes.POINT(x, y)), 2) != window_id:
+            raise RuntimeError("The click would land outside the selected window; inspect it again")
+        if not user.SetCursorPos(x, y):
+            raise RuntimeError("Windows rejected cursor movement")
         user.mouse_event(0x0002, 0, 0, 0, 0)
         user.mouse_event(0x0004, 0, 0, 0, 0)
     elif action == "type":
@@ -159,7 +171,9 @@ def windows(action: str = "snapshot", window_id: int = 0, text: str = "", x: int
             user.GetWindowTextW(hwnd, title, length + 1)
             rect = wintypes.RECT()
             user.GetWindowRect(hwnd, ctypes.byref(rect))
-            windows.append({"id": int(hwnd), "title": title.value,
+            pid = wintypes.DWORD()
+            user.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            windows.append({"id": int(hwnd), "pid": pid.value, "title": title.value,
                             "bounds": [rect.left, rect.top, rect.right, rect.bottom]})
         return True
     user.EnumWindows(collect, 0)

@@ -113,8 +113,10 @@ class _CatalogRig:
             def GetRootActions(self): raise AssertionError("explicit EIDs must not scan all actions")
 
         class ReplayManager:
-            def AsyncInvoke(self, tag, callback):
-                rig.require_ui(); rig.callbacks.append(callback)
+            def AsyncInvoke(self, method, tag=""):
+                assert callable(method) and isinstance(tag, str)
+                rig.require_ui()
+                rig.callbacks.append(method)
             def GetForegroundInvokeGeneration(self): rig.require_ui_or_replay(); return rig.foreground_generation
             def HasPendingForegroundInvoke(self): rig.require_ui_or_replay(); return False
 

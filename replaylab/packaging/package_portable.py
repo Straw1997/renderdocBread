@@ -56,6 +56,18 @@ def write_json(path, value):
     long_path(path).write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def standard_update_archive_name(config, version):
+    update = config["autoUpdate"]
+    if not isinstance(version, str) or not re.fullmatch(update["versionPattern"], version):
+        raise ValueError("The standard release requires a numeric major.minor.patch version")
+    if any(int(segment) > 2**31 - 1 for segment in version.split(".")):
+        raise ValueError("The standard release version is out of range for the updater")
+    name = update["archiveTemplate"].format(version=version)
+    if name != f"RenderDocBread-{version}-win-x64.zip":
+        raise ValueError("The standard release archive name does not match the updater contract")
+    return name
+
+
 def zip_compress_type(relative, size):
     path = Path(relative)
     compressed = {".zip", ".7z", ".gz", ".xz", ".zst", ".bz2", ".png", ".jpg",
@@ -262,6 +274,8 @@ def verify_compilers(root):
 
 def assemble(application, gui, runtime, uex, crt, destination, config, audit_only=False, unity_mcp=None, capabilities=None):
     profile = read_json(capabilities / "bread-capabilities.json").get("distributionProfile", "extended") if capabilities else "core"
+    version = read_json(runtime / HOST_MANIFEST).get("version")
+    archive_name = standard_update_archive_name(config, version) if profile == "standard" else None
     destination.mkdir(parents=True, exist_ok=True)
     # Unique, disposable staging only. Never clean, deploy to, or rename the source application.
     with temporary_directory(prefix="RenderDocBread-release-") as work:
@@ -359,15 +373,16 @@ def assemble(application, gui, runtime, uex, crt, destination, config, audit_onl
         audit(root, config)  # tools must not leave caches or machine-specific configuration
         records = [{"path": p.relative_to(root).as_posix(), "size": p.stat().st_size, "sha256": digest(p)}
                    for p in release_files(root)]
-        write_json(root / "RenderDocBread.manifest.json", {"schema": "renderdocbread-release/v1",
+        manifest_schema = config["autoUpdate"]["manifestSchema"] if archive_name else "renderdocbread-release/v1"
+        write_json(root / "RenderDocBread.manifest.json", {"schema": manifest_schema,
                    "product": config["product"], "platform": config["platform"],
-                   "breadVersion": read_json(root / "replaylab/replaylab-runtime-manifest.json").get("version"),
+                   "breadVersion": version,
                    "profile": profile,
                    "createdUtc": datetime.now(timezone.utc).isoformat(), "files": records})
         audit_receipt = destination / ("RenderDocBread-audit-" + datetime.now().strftime("%Y%m%d-%H%M%S") + ".json")
         write_json(audit_receipt, {"schema": "bread-package-audit/v1", "mode": "audit-only" if audit_only else "package",
             "product": config["product"], "platform": config["platform"], "profile": profile,
-            "breadVersion": read_json(root / "replaylab/replaylab-runtime-manifest.json").get("version"),
+            "breadVersion": version,
             "fileCount": len(records), "requiredFileCount": len(config.get("requiredFiles", [])),
             "sourceInputsSha256": read_json(root / "replaylab/replaylab-runtime-manifest.json").get("sourceInputsSha256"),
             "checks": checked, "passed": True})
@@ -376,7 +391,11 @@ def assemble(application, gui, runtime, uex, crt, destination, config, audit_onl
             print(f"Release audit passed ({len(records)} files)")
             return None
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        archive = destination / f"RenderDocBread-{stamp}-win-x64.zip"
+        archive = destination / (archive_name or f"RenderDocBread-{stamp}-win-x64.zip")
+        suffix = config["autoUpdate"]["checksumSuffix"] if archive_name else ".sha256"
+        checksum = archive.with_name(archive.name + suffix)
+        if archive.exists() or checksum.exists():
+            raise FileExistsError(f"Choose a new release destination for {archive.name}")
         pending = archive.with_suffix(".zip.partial")
         with zipfile.ZipFile(pending, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as output:
             for path in release_files(root):
@@ -384,7 +403,8 @@ def assemble(application, gui, runtime, uex, crt, destination, config, audit_onl
                 output.write(path, "RenderDocBread/" + relative,
                              compress_type=zip_compress_type(relative, path.stat().st_size))
         os.replace(pending, archive)
-        archive.with_suffix(".zip.sha256").write_text(digest(archive) + "  " + archive.name + "\n", encoding="ascii")
+        with checksum.open("x", encoding="ascii") as output:
+            output.write(digest(archive) + "  " + archive.name + "\n")
         print(f"Created {archive}", flush=True)
         return archive
 

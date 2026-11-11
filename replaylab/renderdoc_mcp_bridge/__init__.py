@@ -6145,12 +6145,17 @@ def _current_texture_context(warnings):
             x = _safe_int(getattr(location, "first", -1), -1)
             y = _safe_int(getattr(location, "second", -1), -1)
         picked = {"x": int(x), "y": int(y)} if int(x) >= 0 and int(y) >= 0 else None
+        try:
+            flip_y = bool(viewer.Widget().property("textureDisplayFlipY"))
+        except (AttributeError, RuntimeError):
+            # An unavailable display flag must not discard the captured RT binding.
+            flip_y = False
         return {
             "resourceId": resource_id,
             "name": name,
             "subresource": selected,
             "pickedPixel": picked,
-            "flipY": bool(viewer.Widget().property("textureDisplayFlipY")),
+            "flipY": flip_y,
         }
     except Exception as exc:
         warnings.append("Texture Viewer context is unavailable: %s" % str(exc))
@@ -6739,8 +6744,8 @@ def _begin_current_context_freeze(
             except (TypeError, ValueError):
                 job["aliases"] = []
             replay_manager.AsyncInvoke(
-                CURRENT_CONTEXT_FREEZE_REPLAY_TAG_PREFIX + job_id,
-                lambda ctrl, token=job_id: _run_current_context_freeze_job(token, ctrl))
+                lambda ctrl, token=job_id: _run_current_context_freeze_job(token, ctrl),
+                CURRENT_CONTEXT_FREEZE_REPLAY_TAG_PREFIX + job_id)
         except Exception as exc:
             with _current_context_freeze_jobs_guard:
                 if job["status"] != "queued":
@@ -14803,7 +14808,7 @@ def _begin_export_shader_catalog(params):
         # back to the legacy lane would let a long catalog job monopolise user
         # replay work on builds that lack background scheduling support.
         _ctx.Replay().AsyncInvoke(
-            SHADER_CATALOG_REPLAY_TAG_PREFIX + job_id, callback)
+            callback, SHADER_CATALOG_REPLAY_TAG_PREFIX + job_id)
     except Exception:
         with _shader_catalog_export_jobs_guard:
             _shader_catalog_export_jobs.pop(job_id, None)
@@ -21996,9 +22001,8 @@ def _queue_project_shader_resource_index_slice(job_id):
     if replay_manager is None:
         raise RuntimeError("Project Shader resource-index replay manager is unavailable")
     replay_manager.AsyncInvoke(
-        PROJECT_SHADER_INDEX_REPLAY_TAG_PREFIX + str(job_id),
-        lambda ctrl, token=job_id:
-        _run_project_shader_resource_index_job(token, ctrl))
+        lambda ctrl, token=job_id: _run_project_shader_resource_index_job(token, ctrl),
+        PROJECT_SHADER_INDEX_REPLAY_TAG_PREFIX + str(job_id))
 
 
 def _run_project_shader_resource_index_job(job_id, ctrl):

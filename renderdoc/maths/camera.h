@@ -25,11 +25,11 @@
 
 #pragma once
 
+#include <cmath>
+#include <mutex>
 #include "api/replay/renderdoc_replay.h"
 #include "quat.h"
 #include "vec.h"
-#include <mutex>
-#include <cmath>
 
 class Matrix4f;
 
@@ -45,7 +45,8 @@ public:
   void Shutdown() { delete this; }
   void SetPosition(float x, float y, float z)
   {
-    if(!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return;
+    if(!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+      return;
     std::lock_guard<std::mutex> lock(m_Mutex);
     dirty = true;
     pos = Vec3f(x, y, z);
@@ -53,23 +54,38 @@ public:
 
   void SetNearFar(float n, float f)
   {
-    if(!std::isfinite(n) || !std::isfinite(f) || n <= 0 || f <= n) return;
+    if(!std::isfinite(n) || !std::isfinite(f) || n <= 0 || f <= n)
+      return;
     std::lock_guard<std::mutex> lock(m_Mutex);
     m_Near = n;
     m_Far = f;
   }
 
-  void SetFieldOfView(float degrees) { std::lock_guard<std::mutex> lock(m_Mutex); if(std::isfinite(degrees) && degrees > 0 && degrees < 180) m_FieldOfView = degrees; }
+  void SetFieldOfView(float degrees)
+  {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    if(std::isfinite(degrees) && degrees > 0 && degrees < 180)
+      m_FieldOfView = degrees;
+  }
   static Matrix4f MeshProjection(ICamera *camera, float aspect);
 
-  float GetNear() const { std::lock_guard<std::mutex> lock(m_Mutex); return m_Near; }
-  float GetFar() { std::lock_guard<std::mutex> lock(m_Mutex); return m_Far; }
+  float GetNear() const
+  {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    return m_Near;
+  }
+  float GetFar()
+  {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    return m_Far;
+  }
 
   // Arcball functions
   void ResetArcball();
   void SetArcballDistance(float d)
   {
-    if(!std::isfinite(d)) return;
+    if(!std::isfinite(d))
+      return;
     std::lock_guard<std::mutex> lock(m_Mutex);
     dirty = true;
     dist = d;
@@ -81,7 +97,8 @@ public:
   // FPS look functions
   void SetFPSRotation(float x, float y, float z)
   {
-    if(!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return;
+    if(!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+      return;
     std::lock_guard<std::mutex> lock(m_Mutex);
     dirty = true;
     fpsrot = Quatf::AxisAngle(Vec3f(0, 0, 1), -z) * Quatf::AxisAngle(Vec3f(0, 1, 0), -y) *

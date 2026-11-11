@@ -292,7 +292,8 @@ protected:
   {
     // i18n-ignore: native annotation API state, in canvas-local logical pixels.
     const QRectF bounds = imageRect();
-    setProperty("annotationImageRect", QVariantList{bounds.x(), bounds.y(), bounds.width(), bounds.height()});
+    setProperty("annotationImageRect",
+                QVariantList{bounds.x(), bounds.y(), bounds.width(), bounds.height()});
     setProperty("annotationStrokeCount", marks.size());
     setProperty("annotationSourceSize", image.size());
     QPainter painter(this);

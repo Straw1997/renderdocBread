@@ -27,6 +27,10 @@ the documented artifact checks before delivery; packaging does not authorize ove
 or stopping a running application. Keep release rules in those canonical documents and
 update their links here when the workflow changes.
 
+For releases consumed by the in-app updater, follow the
+[automatic update release contract](./replaylab/packaging/RELEASE_REQUIREMENTS.md#自动更新发布约定)
+and the configured release metadata in the package file's autoUpdate section.
+
 ## Branch and release completion (mandatory)
 
 Keep work under development on its local task branch with changes uncommitted.

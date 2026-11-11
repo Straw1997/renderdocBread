@@ -69,7 +69,7 @@ jobs:
       - name: Test live edit shutdown and integration compatibility
         shell: pwsh
         run: |
-          & ./replaylab/output/build-inputs/environment/Scripts/python.exe -m pytest replaylab/mcp_host/tests/test_integration_manifest.py replaylab/mcp_host/tests/test_shader_live_edit.py replaylab/mcp_host/tests/test_shader_live_edit_lifecycle.py replaylab/mcp_host/tests/test_shader_save_capture_transition.py replaylab/mcp_host/tests/test_shader_scheduler.py replaylab/mcp_host/tests/test_server_frame_render_flow.py replaylab/mcp_host/tests/test_frame_flow_default_layout.py replaylab/mcp_host/tests/test_shader_workspace_panel.py -q --junitxml="$env:RUNNER_TEMP/bread-mcp-tests.xml"
+          & ./replaylab/output/build-inputs/environment/Scripts/python.exe -m pytest replaylab/mcp_host/tests/test_integration_manifest.py replaylab/mcp_host/tests/test_shader_live_edit.py replaylab/mcp_host/tests/test_shader_live_edit_lifecycle.py replaylab/mcp_host/tests/test_shader_save_capture_transition.py replaylab/mcp_host/tests/test_shader_scheduler.py replaylab/mcp_host/tests/test_server_frame_render_flow.py replaylab/mcp_host/tests/test_frame_flow_default_layout.py replaylab/mcp_host/tests/test_shader_workspace_panel.py replaylab/mcp_host/tests/test_unreal_validation.py replaylab/mcp_host/tests/test_unreal_restoration.py replaylab/mcp_host/tests/test_unreal_live_connection.py -q --junitxml="$env:RUNNER_TEMP/bread-mcp-tests.xml"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Retain regression results
         if: always()

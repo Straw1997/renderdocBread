@@ -63,7 +63,6 @@ private:
   mutable uint32_t m_DisplayChannels = 0;
 
 public:
-
   quint64 key(int triangle, int corner) const;
   QSet<uint32_t> selectedVertices() const;
   void changeMode(Selection next);
@@ -89,7 +88,7 @@ public:
   void selectLinked();
   void selectLinkedAt(const QPointF &point);
   void selectMeshLinked(const QPointF &point, const QSize &size, const QMatrix4x4 &transform,
-                         bool homogenous);
+                        bool homogenous);
   void clearSelection();
   void setSelectionMode(MeshUVData::Selection mode);
   void selectVertices(const QSet<uint32_t> &vertices);

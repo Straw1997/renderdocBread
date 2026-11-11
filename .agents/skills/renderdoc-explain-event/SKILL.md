@@ -3,7 +3,7 @@ name: renderdoc-explain-event
 description: Explain captured rendering effects, objects and calculations with evidence and appropriate visual explanations; investigate missing output or organize a requested EID, pass or frame flow in Bread.
 metadata:
   replaylab-category: event-pipeline
-  replaylab-version: "53"
+  replaylab-version: "55"
 ---
 
 # Explain captured events
@@ -115,6 +115,7 @@ labels or calculation-details sections. The main sequence follows execution;
 a horizontal processGraph shows verified cross-RT handoffs, branches and merges, with a texture
 per node. Single-draw arithmetic, parallel MRTs and repeated snapshots are not chains.
 Utility-only stages need no invented Shader algorithm tables.
+Keep whole-frame analysis read-only; do not switch to Shader organization to satisfy a gate.
 The outline is not semantic analysis. Explain techniques and contributions,
 not draw batches. Resolve core purposes during construction; range coverage
 does not establish understanding. `get_frame_render_flow(section="candidates")`

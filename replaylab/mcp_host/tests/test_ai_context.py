@@ -450,9 +450,9 @@ class _Replay(object):
         self.block_invocations += 1
         callback(self.controller)
 
-    def AsyncInvoke(self, *args):
-        callback = args[-1]
-        self.pending.append(callback)
+    def AsyncInvoke(self, method, tag=""):
+        assert callable(method) and isinstance(tag, str)
+        self.pending.append(method)
 
     def run_next(self):
         callback = self.pending.pop(0)

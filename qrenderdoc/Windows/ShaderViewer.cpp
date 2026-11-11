@@ -319,7 +319,7 @@ ShaderViewer::ShaderViewer(ICaptureContext &ctx, QWidget *parent)
         m_FindEditor = editor;
         ToolWindowManager::raiseToolWindow(editor);
         editor->setSelection(position, position);
-        ensureLineScrolled(editor, editor->lineFromPosition(position));
+        EnsureLineScrolled(editor, editor->lineFromPosition(position));
         editor->QWidget::setFocus(Qt::ShortcutFocusReason);
       });
 
@@ -343,15 +343,21 @@ ShaderViewer::ShaderViewer(ICaptureContext &ctx, QWidget *parent)
   m_FindResults->setReadOnly(true);
   m_FindResults->setWindowTitle(tr("Find Results"));
 
+  QObject::connect(m_FindResults, &ScintillaEdit::doubleClick, this,
+                   &ShaderViewer::resultsDoubleClick);
+
   // remove margins
   m_FindResults->setMarginWidthN(0, 0);
   m_FindResults->setMarginWidthN(1, 0);
   m_FindResults->setMarginWidthN(2, 0);
 
-  QObject::connect(m_FindReplace, &FindReplace::performFind, this, &ShaderViewer::performFind);
-  QObject::connect(m_FindReplace, &FindReplace::performFindAll, this, &ShaderViewer::performFindAll);
-  QObject::connect(m_FindReplace, &FindReplace::performReplace, this, &ShaderViewer::performReplace);
-  QObject::connect(m_FindReplace, &FindReplace::performReplaceAll, this,
+  QObject::connect(m_FindReplace, &FindReplace::performFindRequested, this,
+                   &ShaderViewer::performFind);
+  QObject::connect(m_FindReplace, &FindReplace::performFindAllRequested, this,
+                   &ShaderViewer::performFindAll);
+  QObject::connect(m_FindReplace, &FindReplace::performReplaceRequested, this,
+                   &ShaderViewer::performReplace);
+  QObject::connect(m_FindReplace, &FindReplace::performReplaceAllRequested, this,
                    &ShaderViewer::performReplaceAll);
   QObject::connect(m_FindReplace, &FindReplace::searchChanged, [this]() {
     if(m_FindReplace->isVisible())
@@ -370,9 +376,6 @@ ShaderViewer::ShaderViewer(ICaptureContext &ctx, QWidget *parent)
   ui->docking->addToolWindow(m_FindResults, ToolWindowManager::NoArea);
   ui->docking->setToolWindowProperties(
       m_FindResults, ToolWindowManager::HideOnClose | ToolWindowManager::DisallowFloatWindow);
-
-  QObject::connect(m_FindResults, &ScintillaEdit::doubleClick, this,
-                   &ShaderViewer::resultsDoubleClick);
 
   {
     m_DisassemblyView =
@@ -803,7 +806,7 @@ void ShaderViewer::debugShader(const ShaderReflection *shader, ResourceId pipeli
         if(m_ShaderDetails->debugInfo.entryLocation.lineStart > 0)
         {
           GUIInvoke::defer(scintilla, [scintilla, this]() {
-            ensureLineScrolled(scintilla, m_ShaderDetails->debugInfo.entryLocation.lineStart);
+            EnsureLineScrolled(scintilla, m_ShaderDetails->debugInfo.entryLocation.lineStart);
           });
         }
       }
@@ -1056,8 +1059,7 @@ void ShaderViewer::debugShader(const ShaderReflection *shader, ResourceId pipeli
       QAction *act;
 
       act = MakeExecuteAction(tr("&Run forwards"), Icons::control_end_blue(),
-                              tr("Run forwards to the start of the shader"),
-                              QKeySequence(Qt::Key_F5));
+                              tr("Run forwards to the end of the shader"), QKeySequence(Qt::Key_F5));
 
       QObject::connect(act, &QAction::triggered, [this]() { runTo(~0U, true); });
       forwardsMenu->addAction(act);
@@ -1222,16 +1224,7 @@ void ShaderViewer::debugShader(const ShaderReflection *shader, ResourceId pipeli
             m_Variables.push_back(c.after);
         }
 
-        bool preferSourceDebug = false;
-
-        for(const ShaderCompileFlag &flag : m_ShaderDetails->debugInfo.compileFlags.flags)
-        {
-          if(flag.name == "preferSourceDebug")
-          {
-            preferSourceDebug = true;
-            break;
-          }
-        }
+        bool preferSourceDebug = m_ShaderDetails->debugInfo.sourceDebugInformation;
 
         updateDebugState();
 
@@ -1844,6 +1837,7 @@ ScintillaEdit *ShaderViewer::MakeEditor(const QString &name, const QString &text
   ret->indicSetAlpha(INDICATOR_FINDALLHIGHLIGHT, 120);
   ret->indicSetOutlineAlpha(INDICATOR_FINDALLHIGHLIGHT, 180);
 
+  // C# Highlight for bookmarks
   // C# Highlight for bookmarks
   ret->markerSetBack(BOOKMARK_MARKER, SCINTILLA_COLOUR(51, 153, 255));
   ret->markerDefine(BOOKMARK_MARKER, SC_MARK_BOOKMARK);
@@ -3484,9 +3478,9 @@ QString ShaderViewer::samplerRep(const ShaderSampler &samp, uint32_t arrayElemen
     }
 
     if(arrayElement == ~0U || samp.bindArraySize == 1)
-      contents += QString::number(samp.fixedBindNumber);
+      contents += QFormatStr("bind %1").arg(samp.fixedBindNumber);
     else
-      contents += QFormatStr("%1[%2]").arg(samp.fixedBindNumber).arg(arrayElement);
+      contents += QFormatStr("bind %1[%2]").arg(samp.fixedBindNumber).arg(arrayElement);
 
     return contents;
   }
@@ -3659,6 +3653,10 @@ QString ShaderViewer::getRegNames(const RDTreeWidgetItem *item, uint32_t swizzle
 
     const ShaderVariable *reg = GetDebugVariable(debugVar);
 
+    // expect to find the variable
+    if(!reg)
+      return QString();
+
     return reg->name;
   }
 
@@ -3704,6 +3702,10 @@ QString ShaderViewer::getRegNames(const RDTreeWidgetItem *item, uint32_t swizzle
 
     const ShaderVariable *reg = GetDebugVariable(mapping.variables[0]);
 
+    // expect to find the variable
+    if(!reg)
+      return lit("-");
+
     // return the base name with the suffix/tail that we have
     ret = reg->name + itemTag.absoluteRefPath.substr(tag.absoluteRefPath.size());
 
@@ -3717,6 +3719,10 @@ QString ShaderViewer::getRegNames(const RDTreeWidgetItem *item, uint32_t swizzle
      mapping.type == VarType::ReadWriteResource)
   {
     const ShaderVariable *reg = GetDebugVariable(mapping.variables[0]);
+
+    // expect to find the variable
+    if(!reg)
+      return lit("-");
 
     ret = reg->name;
 
@@ -3914,6 +3920,7 @@ const RDTreeWidgetItem *ShaderViewer::evaluateVar(const RDTreeWidgetItem *item, 
           }
           else
           {
+            // out of bounds swizzle
             return NULL;
           }
         }
@@ -4040,7 +4047,12 @@ const RDTreeWidgetItem *ShaderViewer::evaluateVar(const RDTreeWidgetItem *item, 
 
     if(ret.type == VarType::Sampler || ret.type == VarType::ReadOnlyResource ||
        ret.type == VarType::ReadWriteResource)
+    {
       dataSize = 16;
+      // ignore swizzle for resources - some representations like DXBC will generate these for
+      // instructions but it's not a 'real' swizzle to evaluate
+      swizzle = ~0U;
+    }
 
     // only support swizzling on vectors
     if(swizzle != ~0U && (ret.rows > 1 || mapping.variables.size() > 4))
@@ -4064,6 +4076,11 @@ const RDTreeWidgetItem *ShaderViewer::evaluateVar(const RDTreeWidgetItem *item, 
         else if(swiz_i < mapping.variables.size())
         {
           ret.columns = i + 1;
+        }
+        else
+        {
+          // out of bounds swizzle
+          return NULL;
         }
       }
 
@@ -4475,7 +4492,7 @@ void ShaderViewer::updateDebugState()
       int pos = m_DisassemblyView->positionFromLine(lineInfo.disassemblyLine - 1);
       m_DisassemblyView->setSelection(pos, pos);
 
-      ensureLineScrolled(m_DisassemblyView, lineInfo.disassemblyLine - 1);
+      EnsureLineScrolled(m_DisassemblyView, lineInfo.disassemblyLine - 1);
     }
 
     if(IsLastState() && (lineInfo.fileIndex < 0 || lineInfo.fileIndex >= m_FileScintillas.count()))
@@ -4541,7 +4558,7 @@ void ShaderViewer::updateDebugState()
         int pos = m_CurInstructionScintilla->positionFromLine(lineInfo.lineStart - 1);
         m_CurInstructionScintilla->setSelection(pos, pos);
 
-        ensureLineScrolled(m_CurInstructionScintilla, lineInfo.lineStart - 1);
+        EnsureLineScrolled(m_CurInstructionScintilla, lineInfo.lineStart - 1);
       }
     }
   }
@@ -5791,24 +5808,25 @@ uint32_t ShaderViewer::CalcUpdateID(uint32_t prevID, rdcstr debugVarName) const
 // this function is a bit messy, we want a base recursion container of either QList or rdcarray
 // but further recursion is always rdcarray because of ShaderVariable::members
 template <typename Container>
-const ShaderVariable *GetShaderDebugVariable(rdcstr path, const Container &vars)
+const ShaderVariable *GetShaderDebugVariable(const rdcstr &path, const Container &vars)
 {
+  rdcstr base = path;
   rdcstr elem;
 
   // pick out the next element in the path
   // if this is an array index, grab that
-  if(path[0] == '[')
+  if(base[0] == '[')
   {
     int idx = path.indexOf(']');
     if(idx < 0)
       return NULL;
-    elem = path.substr(0, idx + 1);
+    base = path.substr(0, idx + 1);
 
     // skip past any .s
     if(path[idx + 1] == '.')
       idx++;
 
-    path = path.substr(idx + 1);
+    elem = path.substr(idx + 1);
   }
   else
   {
@@ -5816,32 +5834,34 @@ const ShaderVariable *GetShaderDebugVariable(rdcstr path, const Container &vars)
     int idx = path.find_first_of("[.");
     if(idx < 0)
     {
-      // no results means that all that's left of the path is an identifier
-      elem.swap(path);
+      // no results means we want an exact match
     }
     else
     {
-      elem = path.substr(0, idx);
+      base = path.substr(0, idx);
 
       // skip past any .s
       if(path[idx] == '.')
         idx++;
 
-      path = path.substr(idx);
+      elem = path.substr(idx);
     }
   }
 
   // look in our current set of vars for a matching variable
   for(int i = 0; i < vars.count(); i++)
   {
-    if(vars[i].name == elem)
+    if(vars[i].name == path)
+      return &vars[i];
+
+    if(vars[i].name == base)
     {
-      // If there's no more path, we've found the exact match, otherwise continue
-      if(path.empty())
+      // If there's no more, we've found the exact match, otherwise continue
+      if(elem.empty())
         return &vars[i];
 
       // otherwise recurse
-      return GetShaderDebugVariable(path, vars[i].members);
+      return GetShaderDebugVariable(elem, vars[i].members);
     }
   }
 
@@ -5876,15 +5896,6 @@ const ShaderVariable *ShaderViewer::GetDebugVariable(const DebugVariableReferenc
   }
 
   return NULL;
-}
-
-void ShaderViewer::ensureLineScrolled(ScintillaEdit *s, int line)
-{
-  int firstLine = s->firstVisibleLine();
-  int linesVisible = s->linesOnScreen();
-
-  if(s->isVisible() && (line < firstLine || line > (firstLine + linesVisible - 1)))
-    s->setFirstVisibleLine(qMax(0, line - linesVisible / 2));
 }
 
 uint32_t ShaderViewer::CurrentStep()
@@ -7422,7 +7433,7 @@ void ShaderViewer::refreshFindHighlights(bool selectMatch)
     {
       m_FindEditor = candidateEditor;
       candidateEditor->setSelection(result.first, result.second);
-      ensureLineScrolled(candidateEditor, candidateEditor->lineFromPosition(result.first));
+      EnsureLineScrolled(candidateEditor, candidateEditor->lineFromPosition(result.first));
       current = candidateIndex;
 
       const QString findHash =
@@ -7543,7 +7554,7 @@ void ShaderViewer::find(bool down)
 
   cur->setSelection(result.first, result.second);
 
-  ensureLineScrolled(cur, cur->lineFromPosition(result.first));
+  EnsureLineScrolled(cur, cur->lineFromPosition(result.first));
 
   if(down)
     m_FindState.offset = result.second - m_FindState.start;

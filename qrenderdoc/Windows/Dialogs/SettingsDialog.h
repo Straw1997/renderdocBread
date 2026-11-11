@@ -71,6 +71,8 @@ private slots:
   void on_CheckUpdate_AllowChecks_toggled(bool checked);
   void on_Font_PreferMonospaced_toggled(bool checked);
   void on_AlwaysReplayLocally_toggled(bool checked);
+  void on_CaptureDialog_ShowMonitorScript_toggled(bool checked);
+  void on_CaptureDialog_ShowCustomInjectDLL_toggled(bool checked);
   void on_analyticsAutoSubmit_toggled(bool checked);
   void on_analyticsManualCheck_toggled(bool checked);
   void on_analyticsOptOut_toggled(bool checked);
@@ -82,6 +84,16 @@ private slots:
   void on_ExternalTool_RGPIntegration_toggled(bool checked);
   void on_ExternalTool_RadeonGPUProfiler_textEdited(const QString &rgp);
   void on_browseRGPPath_clicked();
+
+  // python
+  void on_Python_StubPaths_clicked();
+  void on_Python_DebugPyDirBrowse_clicked();
+  void on_Python_DebugPyDir_textEdited(const QString &dir);
+  void on_Python_VSCodePathBrowse_clicked();
+  void on_Python_VSCodePath_textEdited(const QString &dir);
+  void on_Python_DebugEnabled_toggled(bool checked);
+  void on_Python_LaunchVSCode_toggled(bool checked);
+  void on_Python_PromptReloadUnchanged_toggled(bool checked);
 
   // texture viewer
   void on_TextureViewer_PerTexSettings_toggled(bool checked);
@@ -129,6 +141,7 @@ private:
 
   void addProcessor(const ShaderProcessingTool &disasm);
   bool editTool(int existing, ShaderProcessingTool &disasm);
+  void updateCaptureDialogOptionalSettings();
 
   ReplayOptionsSelector *m_ReplayOptions;
 

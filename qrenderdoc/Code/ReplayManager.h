@@ -65,8 +65,9 @@ public:
   // processed.
   // the manager processes only the request on the top of the queue, so when a new tagged invoke
   // comes in, we remove any other requests in the queue before it that have the same tag
-  void AsyncInvoke(const rdcstr &tag, InvokeCallback m);
-  void AsyncInvoke(InvokeCallback m);
+  void AsyncInvoke(ReplayInvokeCallback m, rdcstr tag = "");
+  using IReplayManager::AsyncInvoke;
+  void BlockInvoke(ReplayInvokeCallback m);
   // Compatibility names retained for Python. These report only a real
   // selected/effective EID transition, not ordinary foreground maintenance.
   bool HasPendingForegroundInvoke();
@@ -81,8 +82,7 @@ public:
   {
     return m_ExecutingInvokeGeneration.load(std::memory_order_acquire);
   }
-  void BlockInvokeTagged(const rdcstr &tag, InvokeCallback m);
-  void BlockInvoke(InvokeCallback m);
+  void BlockInvokeTagged(const rdcstr &tag, ReplayInvokeCallback m);
 
   void CancelReplayLoop();
 
@@ -120,7 +120,7 @@ public:
 private:
   struct InvokeHandle
   {
-    InvokeHandle(InvokeCallback m, const QString &t = QString())
+    InvokeHandle(ReplayInvokeCallback m, const QString &t = QString())
     {
       tag = t;
       method = m;
@@ -128,7 +128,7 @@ private:
     }
 
     QString tag;
-    InvokeCallback method;
+    ReplayInvokeCallback method;
     QSemaphore processed;
     bool selfdelete;
   };

@@ -32959,6 +32959,250 @@ async def import_resource_export_to_unity(operation_id: str, project_path: str, 
         return _err(error)
 
 
+
+# ==================== UNREAL PROJECT RESTORATION ====================
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def inspect_unreal_project(project_path: str, editor_path: str = "") -> str:
+    """Find the selected .uproject's installed Editor and candidate integration providers.
+
+    Use probe_unreal_rendering to observe actual rendering capabilities.
+    """
+    try:
+        from .unreal_integration import inspect_project
+        return _ok_compact(await asyncio.to_thread(inspect_project, project_path, editor_path or None))
+    except Exception as error:
+        return _err(error)
+
+
+@mcp.tool()
+async def probe_unreal_rendering(project_path: str, editor_path: str = "") -> str:
+    """Probe actual material, light, SceneCapture and post-process APIs in the selected Unreal editor.
+
+    Runs a background Editor probe in the closed target project and restores
+    the project descriptor after checking. Poll get_unreal_integration_job.
+    Choose per-layer routes using observed APIs and renderer settings.
+    """
+    try:
+        from .unreal_integration import _SERVICE
+        return _ok_compact(await asyncio.to_thread(_SERVICE.probe, project_path, editor_path or None))
+    except Exception as error:
+        return _err(error)
+
+
+@mcp.tool()
+async def start_unreal_project_connection(project_path: str, editor_path: str = "",
+                                           interactive: bool = False) -> str:
+    """Set up and verify this project's Unreal editing connection in the background.
+
+    Prefer Epic's installed MCP plugins when available. On earlier UE5 versions,
+    enable the stock Python Editor plugins for Bread's MCP-backed Editor jobs.
+    Set interactive=true on the stock Python provider to keep an editable UE
+    window open with a persistent project-owned control channel. Subsequent
+    editing calls reconnect to it across tasks and Bread restarts, without
+    foreground input. An unrelated open Editor is never taken over or closed.
+    Poll get_unreal_integration_job for the selected provider and its toolsets.
+    """
+    try:
+        from .unreal_integration import _SERVICE
+        return _ok_compact(await asyncio.to_thread(_SERVICE.prepare, project_path, editor_path or None,
+                                                    interactive))
+    except Exception as error:
+        return _err(error)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def get_unreal_integration_job(job_id: str) -> str:
+    """Poll a Bread Unreal connection or import. A render receipt is evidence, not fidelity approval."""
+    try:
+        from .unreal_integration import _SERVICE
+        return _ok_compact(_SERVICE.status(job_id))
+    except Exception as error:
+        return _err(error)
+
+
+@mcp.tool()
+async def call_unreal_project_tool(project_path: str, tool_name: str, arguments: dict[str, Any] | None = None,
+                                   editor_path: str = "") -> str:
+    """Use the managed Unreal project's available MCP editing provider.
+
+    Discover with list_toolsets and describe_toolset, then call_tool with the
+    exact toolset_name, tool_name and arguments. Poll get_unreal_integration_job
+    when the Bread Editor provider queues an operation. Verify graph connections,
+    compilation and save/readback after edits. Annotate each meaningful graph block.
+    """
+    try:
+        from .unreal_integration import _SERVICE
+        return _ok_compact(await asyncio.to_thread(_SERVICE.call, project_path, tool_name, arguments or {},
+                                                    editor_path or None))
+    except Exception as error:
+        return _err(error)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def get_unreal_restoration_recipe_schema() -> str:
+    """Read the structured UE recipe schema for editable surfaces, material functions, RTs and lighting.
+
+    Choose a template per surface from probe_unreal_rendering. Declare a layer
+    plan, named light/view/material variants and the baseline appearance comparison.
+    Keep exact calculations in named functions and verify native substitutions separately. Inputs reference parameters, earlier functions, or PixelNormalWS,
+    VertexNormalWS, CameraVectorWS, WorldPosition, UV0 and ScreenUV.
+    Pass mode final-hdr observes linear Final Color with the engine post-process
+    pipeline. Raw scene-color can omit native GI. Match exposure/presentation
+    settings and verify a controlled GI response before making a GI claim.
+    """
+    try:
+        from .unreal_recipe import COLOR_GRADING, INPUTS, NATIVE_OPERATORS, PINS, PRESENTATION, Recipe, SCENE_INPUTS
+        return _ok_compact({"recipe": Recipe.model_json_schema(), "builtInInputs": INPUTS,
+                            "templatePins": {key: sorted(pins) for key, pins in PINS.items()},
+                            "nativeOperators": NATIVE_OPERATORS, "postProcessInputs": SCENE_INPUTS,
+                            "postProcessSettings": sorted(PRESENTATION), "colorGradingSettings": sorted(COLOR_GRADING)})
+    except Exception as error:
+        return _err(error)
+
+
+@mcp.tool()
+async def import_resource_export_to_unreal(operation_id: str, project_path: str, recipe: dict[str, Any],
+                                           editor_path: str = "", replace_job_id: str = "") -> str:
+    """Build a standalone UE preview map and editable M/MI/MF assets from a finalized Bread export.
+
+    Read get_unreal_restoration_recipe_schema first. Use finalize_resource_export
+    with target "gltf" for each Draw, then name additional operations and their
+    materials in recipe.additionalMeshes to compose one level. Import uses a
+    background Editor and requires that this target project is closed. SceneCapture
+    and ordered material RT passes save hashed render evidence under Saved/Bread.
+    Poll get_unreal_integration_job, then compare each claimed component with
+    compare_unreal_restoration. A replace_job_id republishes in the same asset
+    folder only if the previous assets still match the receipt. Old build assets
+    then move to Saved/Bread, leaving one final copy in Content.
+    """
+    try:
+        from .unreal_integration import _SERVICE
+        return _ok_compact(await asyncio.to_thread(_SERVICE.import_package, project_path, editor_path or None,
+                                                    _RESOURCE_EXPORT_MANAGER, operation_id, recipe,
+                                                    replace_job_id or None))
+    except Exception as error:
+        return _err(error)
+
+
+@mcp.tool()
+async def render_unreal_restoration(project_path: str, base_job_id: str, editor_path: str = "") -> str:
+    """Reopen the saved Unreal map and capture fresh images after project edits.
+
+    Preserves the current saved assets and reads the camera from the level.
+    Uses the original job's declared RT observation plan. Poll
+    get_unreal_integration_job for the new receipt before comparing.
+    """
+    try:
+        from .unreal_integration import _SERVICE
+        return _ok_compact(await asyncio.to_thread(_SERVICE.observe, project_path, editor_path or None,
+                                                    base_job_id))
+    except Exception as error:
+        return _err(error)
+
+
+@mcp.tool()
+async def preflight_unreal_materials(project_path: str, material_paths: list[str],
+                                   include_level: bool = False, editor_path: str = "") -> str:
+    """Compile/check selected consuming materials and instances before a render batch.
+
+    Uses Bread's project-owned Python connection, or a background Editor for a
+    closed project. Poll get_unreal_integration_job. Checks active shader resources and
+    new compile/fallback diagnostics. Does not save assets. Functions are checked
+    through consuming materials. Unsupported diagnostic APIs block approval.
+    """
+    try:
+        from .unreal_integration import _SERVICE
+        return _ok_compact(await asyncio.to_thread(_SERVICE.preflight, project_path, editor_path or None,
+                                                    material_paths, include_level))
+    except Exception as error:
+        return _err(error)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def get_unreal_validation_schema() -> str:
+    """Read regional numeric options and the continuous HDR sequence manifest schema.
+
+    Regions select half-open pixel bounds and/or hashed same-resolution PNG
+    coverage, with explicit top-left origin. P95/P99 use per-pixel maximum absolute
+    channel error. Sequence review checks files/metadata, not independent runtime provenance.
+    """
+    from .unreal_numeric_validation import NumericOptions
+    from .unreal_sequence_validation import Sequence
+    return _ok_compact({"numericOptions": NumericOptions.model_json_schema(),
+                        "sequenceManifest": Sequence.model_json_schema()})
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def review_unreal_hdr_sequence(project_path: str, manifest_path: str, manifest_sha256: str,
+                                    numeric_options: dict[str, Any] | None = None,
+                                    absolute_tolerance: float = 0., max_changed_pixel_fraction: float = 0.,
+                                    required_frames: int = 8) -> str:
+    """Review exported consecutive HDR frames without starting an Editor or changing assets.
+
+    Use get_unreal_validation_schema for the hashed manifest. Checks every actual
+    file, dimensions, indices, timestamps, history/sample declarations and region
+    coverage. Reports adjacent deltas, steady min/max range and first-to-last
+    difference with P95/P99/max/worst pixels/tiles. Motion is reported separately
+    and cannot pass a steady-frame test. Producer timestamps are not independently attested.
+    """
+    try:
+        from .unreal_sequence_validation import review_sequence
+        return _ok_compact(await asyncio.to_thread(review_sequence, project_path, manifest_path, manifest_sha256,
+                                                    numeric_options, absolute_tolerance,
+                                                    max_changed_pixel_fraction, required_frames))
+    except Exception as error:
+        return _err(error)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def compare_unreal_restoration(
+    project_path: str, job_id: str, pass_id: str, reference_path: str, reference_sha256: str,
+    component: str, route: Literal["exact", "replacement"], reference_context: dict[str, Any],
+    rendered_context: dict[str, Any], absolute_tolerance: float = 1.0 / 255.0,
+    max_changed_pixel_fraction: float = 0.0, channels: str = "RGB", substitution_reason: str = "",
+    numeric_options: dict[str, Any] | None = None,
+) -> str:
+    """Compare an observed UE pass against an aligned, hashed reference for one component.
+
+    Contexts declare captureId, eventId, view, displayTransform, temporalState,
+    passMeaning and encoding. Exact comparisons accept native display PNG or
+    matching linear EXR/RGBA32F. Replacement comparisons require a reason.
+    Numeric options add named bounds/hashed coverage masks, P95/P99/max limits,
+    worst pixels and tiles; use get_unreal_validation_schema. Explicit regions
+    determine acceptance, with whole-frame statistics retained as diagnostics.
+    Use component tolerances for numeric RTs and local structure for display PNGs. A numeric
+    pass still requires semantic and motion/view review before claiming fidelity.
+    """
+    try:
+        from .unreal_validation import compare
+        return _ok_compact(await asyncio.to_thread(
+            compare, project_path, job_id, pass_id, reference_path, reference_sha256,
+            component, route, reference_context, rendered_context, absolute_tolerance,
+            max_changed_pixel_fraction, channels, substitution_reason, None, numeric_options))
+    except Exception as error:
+        return _err(error)
+
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def review_unreal_restoration_layers(project_path: str, job_id: str,
+                                          references: list[dict[str, Any]]) -> str:
+    """Evaluate every declared restoration layer against fresh per-pass reference evidence.
+
+    A reference has layer, observation, referencePath, referenceSha256,
+    referenceContext, renderedContext and optional absoluteTolerance,
+    maxChangedPixelFraction, channels, fidelity and numericOptions. For diagnostic variants,
+    both contexts identify variant by id. Returns missing references, errors and
+    adjustment targets. Passing recorded images still requires semantic review.
+    """
+    try:
+        from .unreal_validation import review_layers
+        return _ok_compact(await asyncio.to_thread(review_layers, project_path, job_id, references))
+    except Exception as error:
+        return _err(error)
+
+
 # ==================== OPTIONAL DRAW ROUTING ====================
 
 @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False})
@@ -33494,6 +33738,9 @@ def publish_visual_reply(title: str, cards: list[VisualReplyCard],
     Each picture supports its own annotations/secondAnnotations. Supply actual
     source images for calculation/output nodes when that visual explains the
     question; an empty node does not generate its missing picture automatically.
+    Add short // comments to the node's calculation. In each node codeBlocks
+    entry, notes:[{sourceLine:...,text:'...'}] explains key groups immediately above
+    their displayed, verified source lines without editing the source or its links.
     Nodes also accept links:[{label:'...',url:'rdoc://shader/...'}] to code,
     textures (rdoc://texture/<ResourceId>?eid=<EID>&kind=srv) or get_cbuffer_parameter_link
     URLs. Use the actual consuming or producing EID and attachment kind (srv, uav,

@@ -20,8 +20,10 @@ inline QImage TexturePreviewChannels(const QImage &source, unsigned mask)
       const QRgb value = pixels[x];
       if(single)
       {
-        const int channel = mask == 1 ? qRed(value) : mask == 2 ? qGreen(value)
-                                       : mask == 4 ? qBlue(value) : qAlpha(value);
+        const int channel = mask == 1   ? qRed(value)
+                            : mask == 2 ? qGreen(value)
+                            : mask == 4 ? qBlue(value)
+                                        : qAlpha(value);
         pixels[x] = qRgb(channel, channel, channel);
       }
       else

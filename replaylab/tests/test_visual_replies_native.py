@@ -44,7 +44,8 @@ def test_native_visuals_compare_mesh_material_navigation_and_integrity(tmp_path)
          'meshEffect':{'type':'inverted-hull','amount':.08,'color':'#2060ff'}},
         {'type':'diagram','title':'Stages','nodes':[{'id':'a','text':'Geometry','eventId':77},{'id':'b','text':'Color','eventId':88,'details':'Use the [incoming slopes](rdoc://shader/test?line=7) from the [water texture](rdoc://resource/271).','calculation':'pattern = XZ * weights.y\n        + XY * weights.z + ZY * weights.x\nnormal = normalize(input)',
          'links':[{'label':'Shader calculation','url':'rdoc://shader/test?line=7'}],
-         'codeBlocks':[dict(title='Initialize and calculate',workspacePath='C:/workspace',expectedSourceSha256='a'*64,startLine=12,endLine=31)]}],
+         'codeBlocks':[dict(title='Initialize and calculate',workspacePath='C:/workspace',expectedSourceSha256='a'*64,startLine=12,endLine=31,
+             notes=[dict(sourceLine=31,text='Use the final color <after blending>.')])]}],
          'edges':[['a','b']],'edgeLabels':['Carry slopes'],'edgeDetails':['Pass the slopes into lighting.']},
         paired,
         {'type':'code','title':'Key calculation','caption':'A hidden caption must not overlap code','workspacePath':'C:/workspace','expectedSourceSha256':'a'*64,'startLine':12,'endLine':31}
@@ -59,6 +60,7 @@ def test_native_visuals_compare_mesh_material_navigation_and_integrity(tmp_path)
 #include <cstdio>
 #include <QFile>
 #include <QJsonDocument>
+#include <QPainterPathStroker>
 #include <QTimer>
 #include "Windows/AI/AIVisualReply.cpp"
 int main(int argc,char **argv) {
@@ -249,6 +251,16 @@ int main(int argc,char **argv) {
    stageCode->toPlainText().contains("Initialize and calculate")&&
    QUrlQuery(QUrl(stageCode->document()->find("finalColor").charFormat().anchorHref())).queryItemValue("line")=="31"&&
    !stageCode->document()->find("****").charFormat().isAnchor();
+ const auto codeNote=stageCode->document()->find("Use the final color <after blending>.");
+ const auto exactColor=stageCode->document()->find("finalColor");
+ result["stageCodeNotesAreEscapedAndDoNotShiftLinks"]=!codeNote.isNull()&&
+   codeNote.position()<exactColor.position()&&!codeNote.charFormat().isAnchor()&&
+   QUrlQuery(QUrl(exactColor.charFormat().anchorHref())).queryItemValue("line")=="31";
+ QTextDocument annotatedMath;
+ annotatedMath.setHtml(calculationHtml(QString::fromUtf8(
+   u8"// 保留分支 A × B 的说明\nalpha = mask * fade // 控制透明度"),reply.palette()));
+ result["pseudocodeCommentsKeepContentAndStayAfterTerminator"]=annotatedMath.toPlainText().contains(
+   QString::fromUtf8(u8"// 保留分支 A × B 的说明\nalpha = mask * fade; // 控制透明度"));
  selector->setCurrentIndex(2);
  auto *flowPanels=stack->currentWidget()->findChild<QSplitter *>("aiVisualFlowPanels");
  result["stageDetailsCanBeResizedForLongCode"]=flowPanels&&flowPanels->count()==2&&notes->maximumHeight()>180;
@@ -361,6 +373,170 @@ int main(int argc,char **argv) {
  fan.resize(650,350);bool eachWire=true;
  for(int i=0;i<fanEdges.size();++i)eachWire&=fan.diagramEdgeAt(fan.diagramTransform().map(fan.diagramWire(i).pointAtPercent(.5)))==i;
  result["convergingWiresSelectNearestCurve"]=eachWire;
+ QJsonArray flowNodes;
+ for(const QString &name : {QString("Texture"), QString("Mist"), QString("Rain"), QString("Streaks"),
+                            QString("Mask"), QString("Fog"), QString("Lighting"), QString("Scene")})
+   flowNodes.append(QJsonObject{{"id",name},{"text",name},{"description","Rendering stage"}});
+ const QJsonArray flowEdges{QJsonArray{"Texture","Mist"},QJsonArray{"Mist","Mask"},
+   QJsonArray{"Rain","Mask"},QJsonArray{"Mask","Scene"},QJsonArray{"Fog","Scene"},
+   QJsonArray{"Streaks","Lighting"},QJsonArray{"Streaks","Scene"},QJsonArray{"Lighting","Scene"}};
+ const QJsonObject flowCard{{"type","diagram"},{"nodes",flowNodes},{"edges",flowEdges}};
+ auto edits=std::make_shared<VisualCanvas::DiagramEdits>();
+ VisualCanvas flow(flowCard,nullptr,edits), expandedFlow(flowCard,nullptr,edits);
+ flow.resize(1100,680);expandedFlow.resize(970,520);
+ QPalette flowPalette=flow.palette();flowPalette.setColor(QPalette::Dark,QColor(28,28,28));
+ flowPalette.setColor(QPalette::Highlight,QColor(35,110,160));flow.setPalette(flowPalette);
+ const QVector<QRectF> automatic=flow.diagramBoxes();
+ result["independentInputsSitNearTheirFirstConsumer"]=automatic[0].left()<automatic[1].left()&&
+    automatic[2].left()==automatic[1].left()&&automatic[5].left()==automatic[4].left()&&
+    automatic[6].left()<automatic[7].left();
+ auto clearWires=[&]() {
+   QPainterPathStroker stroker;stroker.setWidth(1);
+   for(int i=0;i<flowEdges.size();++i) {
+     const auto wire=flow.diagramWire(i);
+     if(wire.isEmpty())return false;
+     const QPainterPath ink=stroker.createStroke(wire);
+     for(const auto &box:flow.diagramBoxes())
+       if(ink.intersects(box.adjusted(2,2,-2,-2)))return false;
+   }
+   return true;
+ };
+ QSet<int> sinkPorts;
+ for(int i : {3,4,6,7})sinkPorts.insert(qRound(flow.diagramWire(i).currentPosition().y()));
+ result["sharedDestinationHasDistinctPorts"]=sinkPorts.size()==4;
+ const auto automaticCurve=flow.diagramWire(1);
+ bool hasCurvedElement=false;
+ for(int i=0;i<automaticCurve.elementCount();++i)
+   hasCurvedElement|=automaticCurve.elementAt(i).isCurveTo();
+ result["ordinaryConnectionsAreCurvedWithoutVisibleRerouteHandles"]=hasCurvedElement&&
+   std::all_of(edits->reroutes.cbegin(),edits->reroutes.cend(),
+               [](const QVector<QPointF> &points){return points.isEmpty();});
+ result["skipConnectionsRouteOutsideAllCards"]=clearWires();
+ auto send=[&](QEvent::Type type,const QPointF &pos,Qt::MouseButton button,Qt::MouseButtons buttons) {
+   QMouseEvent event(type,pos,button,buttons,Qt::NoModifier);QApplication::sendEvent(&flow,&event);
+ };
+ auto clickFlow=[&](const QPointF &pos) {
+   send(QEvent::MouseButtonPress,pos,Qt::LeftButton,Qt::LeftButton);
+   send(QEvent::MouseButtonRelease,pos,Qt::LeftButton,Qt::NoButton);
+ };
+ auto dragFlow=[&](const QPointF &from,const QPointF &to) {
+   send(QEvent::MouseButtonPress,from,Qt::LeftButton,Qt::LeftButton);
+   send(QEvent::MouseMove,to,Qt::NoButton,Qt::LeftButton);
+   send(QEvent::MouseButtonRelease,to,Qt::LeftButton,Qt::NoButton);
+ };
+ const auto framing=flow.diagramTransform();
+ const auto from=framing.map(automatic[0].center());
+ const auto to=framing.map(automatic[0].center()+QPointF(-30,90));
+ const auto oldStart=flow.diagramWire(0).pointAtPercent(0);
+ send(QEvent::MouseButtonPress,from,Qt::LeftButton,Qt::LeftButton);
+ const auto overlap=framing.map(automatic[1].center());
+ send(QEvent::MouseMove,overlap,Qt::NoButton,Qt::LeftButton);
+ const bool followsOverlappingPointer=
+     (flow.diagramBoxes()[0].center()-automatic[1].center()).manhattanLength()<.01;
+ send(QEvent::MouseMove,to,Qt::NoButton,Qt::LeftButton);
+ result["heldDragCrossesCardsAndRoutesBeforeRelease"]=
+     followsOverlappingPointer&&clearWires()&&expandedFlow.diagramBoxes()[0]==flow.diagramBoxes()[0]&&
+     (flow.diagramWire(0).pointAtPercent(0)-oldStart).manhattanLength()>25;
+ send(QEvent::MouseButtonRelease,to,Qt::LeftButton,Qt::NoButton);
+ result["nodeDragMovesOnlyThatCardWithoutReframing"]=flow.selectedNode==0&&
+    (flow.diagramBoxes()[0].center()-automatic[0].center()-QPointF(-30,90)).manhattanLength()<.01&&
+    flow.diagramBoxes()[1]==automatic[1]&&flow.diagramTransform()==framing&&
+    (flow.diagramWire(0).pointAtPercent(0)-oldStart).manhattanLength()>25;
+ result["movedCardsRemainObstaclesAndViewsShareEdits"]=clearWires()&&
+    expandedFlow.diagramBoxes()[0]==flow.diagramBoxes()[0];
+ const auto route=flow.diagramWire(0);
+ QPointF wireSpot;
+ for(double f : {.5,.4,.6,.3,.7}) {
+   const QPointF point=route.pointAtPercent(f);
+   const auto spot=framing.map(point);
+   if(flow.diagramEdgeAt(spot)==0&&
+      std::none_of(flow.diagramBoxes().begin(),flow.diagramBoxes().end(),
+                   [&](const QRectF &box){return AIVisualFlow::Margin(box).contains(point);})) {
+     wireSpot=spot;break;
+   }
+ }
+ clickFlow(wireSpot);
+ const auto selectedImage=grab(&flow);
+ int orangeInk=0;
+ for(int y=0;y<selectedImage.height();++y)for(int x=0;x<selectedImage.width();++x) {
+   const QColor pixel=selectedImage.pixelColor(x,y);
+   if(pixel.red()>220&&pixel.green()>120&&pixel.green()<190&&pixel.blue()<85)++orangeInk;
+ }
+ result["selectedWireIsOrange"]=flow.selectedEdge==0&&orangeInk>20;
+ send(QEvent::MouseButtonDblClick,wireSpot,Qt::LeftButton,Qt::LeftButton);
+ result["doubleClickAddsOneEditableReroute"]=edits->reroutes[0].size()==1;
+ if(edits->reroutes[0].size()==1) {
+   const QPointF before=edits->reroutes[0][0];
+   const QPointF after(before.x(),before.y()-55);
+   dragFlow(framing.map(before),framing.map(after));
+   result["rerouteDragChangesWireWithoutMovingCards"]=
+       (edits->reroutes[0][0]-after).manhattanLength()<.01&&flow.diagramBoxes()[1]==automatic[1]&&
+       flow.diagramEdgeAt(framing.map(after))==0&&clearWires();
+ }
+ flow.resetDiagramLayout();
+ result["resetRestoresAutomaticLayoutInBothViews"]=flow.diagramBoxes()==automatic&&
+   expandedFlow.diagramBoxes()==automatic&&edits->reroutes[0].isEmpty();
+ send(QEvent::MouseButtonPress,from,Qt::LeftButton,Qt::LeftButton);
+ send(QEvent::MouseMove,to,Qt::NoButton,Qt::LeftButton);
+ send(QEvent::MouseButtonRelease,overlap,Qt::LeftButton,Qt::NoButton);
+ const auto settled=flow.diagramBoxes();
+ const QPointF correction=settled[0].center()-automatic[1].center();
+ const QPointF backtrack=framing.inverted().map(to)-automatic[1].center();
+ bool dropClear=true;
+ for(int i=1;i<settled.size();++i)
+   dropClear&=settled[i]==automatic[i]&&
+       !AIVisualFlow::Margin(settled[0]).adjusted(.000001,.000001,-.000001,-.000001)
+            .intersects(AIVisualFlow::Margin(settled[i]));
+ result["overlappingReleaseSettlesNearTheActualPointer"]=dropClear&&
+     QPointF::dotProduct(correction,correction)<QPointF::dotProduct(backtrack,backtrack)&&
+     expandedFlow.diagramBoxes()==settled;
+ flow.resetDiagramLayout();
+ const QVector<QRectF> blockedExit{{0,0,20,20},{5,-20,55,60},{-55,-11,20,32}};
+ result["nearestDropChecksOtherCardsAndFindsTheExposedCorner"]=
+     AIVisualFlow::NearestClearNodeDisplacement(blockedExit,0,{})==QPointF(-39,45);
+ const QPointF reroutePoint(0,10);
+ const auto rerouteCorrection=AIVisualFlow::NearestClearNodeDisplacement(
+     {blockedExit[0]},0,{{reroutePoint}});
+ result["nearestDropKeepsTheWireHandleOutsideTheCardMargin"]=
+     qAbs(rerouteCorrection.x()-12.001)<.000001&&rerouteCorrection.y()==0&&
+     !AIVisualFlow::Margin(blockedExit[0].translated(rerouteCorrection)).contains(reroutePoint);
+ const QPointF obstacleStart(550,-160), obstacleEnd(550,0);
+ const QPointF dragCenters[]={obstacleStart,{0,450},{450,450},{900,450},
+                              {1350,450},{1800,450},{0,0},{1100,0}};
+ for(int i=0;i<automatic.size();++i)edits->offsets[i]=dragCenters[i]-automatic[i].center();
+ edits->changed();
+ const auto oldUnrelatedWire=flow.diagramWire(7);
+ send(QEvent::MouseButtonPress,framing.map(obstacleStart),Qt::LeftButton,Qt::LeftButton);
+ send(QEvent::MouseMove,framing.map(obstacleEnd),Qt::NoButton,Qt::LeftButton);
+ const auto movedUnrelatedWire=flow.diagramWire(7);
+ QPainterPathStroker wireStroke;
+ wireStroke.setWidth(1);
+ const QRectF obstacle=flow.diagramBoxes()[0].adjusted(2,2,-2,-2);
+ result["unrelatedWireDetoursAroundDraggedCardBeforeRelease"]=
+     wireStroke.createStroke(oldUnrelatedWire).intersects(obstacle)&&
+     !wireStroke.createStroke(movedUnrelatedWire).intersects(obstacle);
+ send(QEvent::MouseButtonRelease,framing.map(obstacleEnd),Qt::LeftButton,Qt::NoButton);
+ const QPointF right(1,0);
+ const auto routeAround=[&](const QVector<QRectF> &obstacles,const AIVisualFlow::CurveRoute &old) {
+   return AIVisualFlow::RouteCurve(QPointF(),QPointF(800,0),right,right,obstacles,old,2);
+ };
+ const QVector<QRectF> shallow{{360,-10,80,30}}, narrow{{380,-175,40,350}},
+     wide{{220,-240,360,480}}, trapped{{-50,-350,100,700}};
+ const auto bent=routeAround(shallow,{}), onePoint=routeAround(narrow,{});
+ const auto twoPoints=routeAround(wide,{}), fallback=routeAround(trapped,{});
+ result["curveBendsBeforeAddingAnyAutomaticPoint"]=bent.curves.size()==1&&
+     bent.curves.front().first.y()!=0&&AIVisualFlow::BlockedCards(bent,shallow)==0;
+ result["detoursUseOnePointBeforeTryingTwo"]=onePoint.curves.size()==2&&
+     AIVisualFlow::BlockedCards(onePoint,narrow)==0&&twoPoints.curves.size()==3&&
+     AIVisualFlow::BlockedCards(twoPoints,wide)==0;
+ result["blockedPortsKeepACurveWithinTheTwoPointBudget"]=fallback.curves.size()<=3&&
+     !fallback.curves.isEmpty()&&AIVisualFlow::BlockedCards(fallback,trapped)>0;
+ const QVector<QRectF> shifted{{360,-13,80,30}};
+ const auto next=routeAround(shifted,bent);
+ const auto continued=AIVisualFlow::ContinueRoute(bent,next,shifted);
+ result["movingObstacleKeepsTheExistingSideAndPorts"]=continued.side==bent.side&&
+     continued.curves.front().start==QPointF()&&continued.curves.back().end==QPointF(800,0)&&
+     AIVisualFlow::BlockedCards(continued,shifted)==0;
  fieldNode["text"]=QString("Long node title ").repeated(12);
  fieldNode["imageLabel"]=QString("ShaderTextureCalculation ").repeated(8);
  fieldNode["description"]=QString("A clear explanation with multiple complete lines. ").repeated(15);

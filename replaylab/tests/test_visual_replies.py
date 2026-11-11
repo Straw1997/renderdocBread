@@ -76,8 +76,9 @@ def test_nodes_keep_independent_verified_code_and_inline_explanations(tmp_path):
         return dict(title='Calculation',workspacePath='C:/workspace',expectedSourceSha256='a'*64,
                     startLine=line,endLine=line)
     details='The [incoming value](rdoc://shader/test?line=7) controls the result.'
+    note = dict(sourceLine=7, text='Use the value to control how quickly the edge fades.')
     result=publish('Effect',[dict(type='diagram',title='Flow',nodes=[
-        dict(id='prepare',text='Prepare',details=details,codeBlocks=[block(7)]),
+        dict(id='prepare',text='Prepare',details=details,codeBlocks=[dict(block(7), notes=[note])]),
         dict(id='shade',text='Shade',codeBlocks=[block(40),block(80)])],edges=[['prepare','shade']])],{},
         capture_image=lambda _:None,capture_mesh=lambda _:None,authorize_file=Path,
         root=tmp_path/'visuals',read_code=read)
@@ -86,6 +87,14 @@ def test_nodes_keep_independent_verified_code_and_inline_explanations(tmp_path):
     assert nodes[0]['details']==details and nodes[0]['codeBlocks'][0]['lineNumbers']==[7]
     assert [b['lineNumbers']for b in nodes[1]['codeBlocks']]==[[40],[80]]
     assert 'workspacePath' not in nodes[0]['codeBlocks'][0]
+    assert nodes[0]['codeBlocks'][0]['notes']==[note]
+    assert nodes[0]['codeBlocks'][0]['text']=='float value = input;'
+    for invalid in ([dict(note, sourceLine=8)], [note, note]):
+        with pytest.raises(ValueError,match='distinct saved-source lines'):
+            publish('Effect',[dict(type='diagram',title='Flow',nodes=[
+                dict(id='a',text='A',codeBlocks=[dict(block(7), notes=invalid)])])],{},
+                capture_image=lambda _:None,capture_mesh=lambda _:None,authorize_file=Path,
+                root=tmp_path/'visuals',read_code=read)
     with pytest.raises(ValueError,match='not both'):
         Card.model_validate(dict(type='diagram',title='Flow',nodes=[dict(id='a',text='A',codeBlocks=[
             dict(block(1),sourceRanges=[dict(startLine=1,endLine=1)],exampleCode='float x;')])]))

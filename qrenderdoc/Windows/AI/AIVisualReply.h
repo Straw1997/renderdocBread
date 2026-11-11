@@ -1,12 +1,15 @@
 #pragma once
 
 #include <QCoreApplication>
-#include <QJsonObject>
-#include <QJsonArray>
 #include <QImage>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QUrl>
 #include <QWidget>
 #include <functional>
+#include <memory>
+
+struct AIVisualReplyLayoutState;
 
 // A native, offline visual answer. Only a hash-addressed Host manifest and its
 // verified PNG/geometry blobs are loaded; model HTML/URLs never enter a renderer.
@@ -21,10 +24,13 @@ public:
   static QImage verifiedImage(const QJsonObject &asset);
   static QStringList visibleIdentities(const QJsonArray &references);
   static QJsonObject navigationTarget(const QString &identity);
-  static QUrl resolveLegacyTextureLink(const QUrl &url, const QString &identity, QJsonObject &capture);
+  static QUrl resolveLegacyTextureLink(const QUrl &url, const QString &identity,
+                                       QJsonObject &capture);
   static int inlineHeight(const QString &identity);
 
 private:
+  AIVisualReply(const QString &identity, Navigate navigate, QWidget *parent,
+                std::shared_ptr<AIVisualReplyLayoutState> layouts);
   void setComparisonMode(int mode);
   int m_ComparisonMode = 2;
 };

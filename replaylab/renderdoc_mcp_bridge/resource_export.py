@@ -1158,13 +1158,15 @@ def _capture_attribute(ctrl, attribute, record, compact_vertices, action, reques
         return
 
     binding = record["buffer"]
-    stride = _safe_int(binding.get("byteStride"), 0)
+    stride = binding.get("byteStride")
     element_size = _safe_int(record["sourceFormat"].get("elementByteSize"), 0)
-    if not binding["resourceId"] or stride <= 0 or element_size <= 0:
+    # A Vulkan stride of zero reads the same bound element at every vertex.
+    constant_stride = stride == 0 and request.get("api") in ("Vulkan", "GraphicsAPI.Vulkan")
+    if not binding["resourceId"] or stride is None or (stride <= 0 and not constant_stride) or element_size <= 0:
         record["canonical"]["reason"] = "vertex buffer binding or element size is unavailable"
         record["raw"]["reason"] = record["canonical"]["reason"]
         return
-    if element_size > stride:
+    if not constant_stride and element_size > stride:
         record["canonical"]["reason"] = "vertex element exceeds its bound stride"
         record["raw"]["reason"] = record["canonical"]["reason"]
         return
@@ -1817,7 +1819,7 @@ def capture_controller(ctrl, rd_module, request, stages):
             if str(item or "").strip())[:6]
         api, textures, samplers, bound_stages, unexported = _pipeline_snapshot(
             ctrl, pipeline, stages)
-        mesh = _action_mesh(ctrl, pipeline, action, request, rd_module, writer, True)
+        mesh = _action_mesh(ctrl, pipeline, action, dict(request, api=api), rd_module, writer, True)
         buffers, unexported = _capture_bound_buffers(ctrl, unexported, mesh, request["eventId"], writer, rd_module)
         for texture in textures:
             _save_texture_dds(ctrl, rd_module, texture, writer, extra_formats=texture_formats)

@@ -27,6 +27,7 @@
 #include <stdint.h>
 #include <QMainWindow>
 #include <QMutex>
+#include <QPointer>
 #include <QSemaphore>
 #include <QThread>
 #include <QTimer>
@@ -40,6 +41,7 @@ class MainWindow;
 }
 
 class RDLabel;
+class RDToolButton;
 class RDMenu;
 class LambdaThread;
 class QMimeData;
@@ -48,6 +50,7 @@ class QShortcut;
 class QToolButton;
 class CaptureDialog;
 class LiveCapture;
+class UpdateDialog;
 class QNetworkAccessManager;
 
 class NetworkWorker : public QObject
@@ -83,6 +86,7 @@ public:
   void RegisterShortcut(const rdcstr &shortcut, QWidget *widget, ShortcutCallback callback) override;
   void UnregisterShortcut(const rdcstr &shortcut, QWidget *widget) override;
   void BringToFront() override;
+  bool PromptCloseCapture() override;
 
   // ICaptureViewer
   void OnCaptureLoaded() override;
@@ -107,20 +111,18 @@ public:
   void captureModified();
   void LoadFromFilename(const QString &filename, bool temporary);
   void LoadCapture(const QString &filename, const ReplayOptions &opts, bool temporary, bool local);
-  void CloseCapture();
   QString GetSavePath(QString title = QString(), QString filter = QString());
 
   void OnCaptureTrigger(const QString &exe, const QString &workingDir, const QString &cmdLine,
                         const rdcarray<EnvironmentModification> &env, CaptureOptions opts,
-                        std::function<void(LiveCapture *)> callback);
+                        std::function<void(ICaptureConnection *)> callback);
   void OnInjectTrigger(uint32_t PID, const rdcarray<EnvironmentModification> &env,
                        const QString &name, CaptureOptions opts,
-                       std::function<void(LiveCapture *)> callback);
+                       std::function<void(ICaptureConnection *)> callback);
 
   void ShowLiveCapture(LiveCapture *live);
   void LiveCaptureClosed(LiveCapture *live);
 
-  bool PromptCloseCapture();
   bool PromptSaveCaptureAs();
   bool SaveCurrentCapture(QString saveFilename);
 
@@ -212,6 +214,8 @@ private slots:
   void ClearRecentCaptureFiles();
   void ClearRecentCaptureSettings();
 
+  void PythonStatusUpdate();
+
   void networkRequestFailed(QUrl url, QString error);
   void networkRequestCompleted(QUrl url, QByteArray data);
 
@@ -235,17 +239,6 @@ private:
   void MakeNetworkRequest(QUrl url, std::function<void(QByteArray)> success,
                           std::function<void(QString)> failure = {});
 
-  enum class UpdateResult
-  {
-    Disabled,
-    Unofficial,
-    Toosoon,
-    Latest,
-    Upgrade,
-  };
-
-  typedef std::function<void(UpdateResult)> UpdateResultMethod;
-
   Ui::MainWindow *ui;
   ICaptureContext &m_Ctx;
 
@@ -257,11 +250,14 @@ private:
 
   RDLabel *statusIcon;
   RDLabel *statusText;
+  RDToolButton *extensionStatus;
+  RDToolButton *extensionReload;
   QProgressBar *statusProgress;
   RDMenu *contextChooserMenu;
   QToolButton *contextChooser;
 
   QAction *updateAction = NULL;
+  QPointer<UpdateDialog> m_UpdateDialog;
 
   QTimer m_MessageTick;
   // UI-thread owned. Debug message polling is single-flight so a slow replay/remote call cannot
@@ -288,10 +284,11 @@ private:
 
   QString m_LastSaveCapturePath;
 
-  void CheckUpdates(bool forceCheck = false, UpdateResultMethod callback = UpdateResultMethod());
+  void CheckUpdates(bool forceCheck = false);
+  void ReportUpdateCheckFailure(const QString &error, bool manual);
+  bool m_CheckingForUpdates = false;
   void SetUpdateAvailable();
-  void SetNoUpdate();
-  void UpdatePopup();
+  void UpdatePopup(const QString &version, const QByteArray &response, bool automatic = false);
   bool HandleMismatchedVersions();
   bool IsVersionMismatched();
 

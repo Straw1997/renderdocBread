@@ -32,6 +32,7 @@
 #include "Code/Interface/QRDInterface.h"
 #include "Code/QRDUtils.h"
 #include "Code/TranslationManager.h"
+#include "Code/pyrenderdoc/PythonContext.h"
 #include "Styles/StyleData.h"
 #include "Widgets/OrderedListEditor.h"
 #include "Widgets/ReplayOptionsSelector.h"
@@ -226,6 +227,8 @@ SettingsDialog::SettingsDialog(ICaptureContext &ctx, QWidget *parent)
   ui->TextureViewer_PerTexYFlip->setEnabled(ui->TextureViewer_PerTexSettings->isChecked());
 
   ui->AlwaysReplayLocally->setChecked(m_Ctx.Config().AlwaysReplayLocally);
+  ui->CaptureDialog_ShowMonitorScript->setChecked(m_Ctx.Config().CaptureDialog_ShowMonitorScript);
+  ui->CaptureDialog_ShowCustomInjectDLL->setChecked(m_Ctx.Config().CaptureDialog_ShowCustomInjectDLL);
 
   {
     const SDObject *getPaths = RENDERDOC_GetConfigSetting("DXBC.Debug.SearchDirPaths");
@@ -333,6 +336,13 @@ SettingsDialog::SettingsDialog(ICaptureContext &ctx, QWidget *parent)
   ui->EventBrowser_AddFake->setChecked(m_Ctx.Config().EventBrowser_AddFake);
   ui->EventBrowser_ApplyColors->setChecked(m_Ctx.Config().EventBrowser_ApplyColors);
   ui->EventBrowser_ColorEventRow->setChecked(m_Ctx.Config().EventBrowser_ColorEventRow);
+
+  ui->Python_DebugEnabled->setChecked(m_Ctx.Config().Python_DebugEnabled);
+  ui->Python_LaunchVSCode->setChecked(m_Ctx.Config().Python_LaunchVSCode);
+  ui->Python_PromptReloadUnchanged->setChecked(m_Ctx.Config().Python_PromptReloadUnchanged);
+
+  ui->Python_DebugPyDir->setText(m_Ctx.Config().Python_DebugPyDir);
+  ui->Python_VSCodePath->setText(m_Ctx.Config().Python_VSCodePath);
 
   ui->Comments_ShowOnLoad->setChecked(m_Ctx.Config().Comments_ShowOnLoad);
 
@@ -608,6 +618,30 @@ void SettingsDialog::on_AlwaysReplayLocally_toggled(bool checked)
   m_Ctx.Config().Save();
 }
 
+void SettingsDialog::updateCaptureDialogOptionalSettings()
+{
+  if(!m_Ctx.HasCaptureDialog())
+    return;
+
+  CaptureDialog *captureDialog = qobject_cast<CaptureDialog *>(m_Ctx.GetCaptureDialog()->Widget());
+  if(captureDialog)
+    captureDialog->UpdateOptionalSettingsVisibility();
+}
+
+void SettingsDialog::on_CaptureDialog_ShowMonitorScript_toggled(bool checked)
+{
+  m_Ctx.Config().CaptureDialog_ShowMonitorScript = checked;
+  m_Ctx.Config().Save();
+  updateCaptureDialogOptionalSettings();
+}
+
+void SettingsDialog::on_CaptureDialog_ShowCustomInjectDLL_toggled(bool checked)
+{
+  m_Ctx.Config().CaptureDialog_ShowCustomInjectDLL = checked;
+  m_Ctx.Config().Save();
+  updateCaptureDialogOptionalSettings();
+}
+
 void SettingsDialog::on_analyticsAutoSubmit_toggled(bool checked)
 {
   if(checked)
@@ -841,6 +875,126 @@ void SettingsDialog::on_browseRGPPath_clicked()
   m_Ctx.Config().Save();
 }
 
+void SettingsDialog::on_Python_StubPaths_clicked()
+{
+  QDialog listEditor;
+
+  listEditor.setWindowTitle(tr("Extra python stubs generation directories"));
+  listEditor.setWindowFlags(listEditor.windowFlags() & ~Qt::WindowContextHelpButtonHint);
+
+  OrderedListEditor list(tr("Stubs Directory"),
+                         OrderedItemExtras::BrowseFolder | OrderedItemExtras::Delete);
+
+  QVBoxLayout layout;
+  QDialogButtonBox okCancel;
+  okCancel.setStandardButtons(QDialogButtonBox::Cancel | QDialogButtonBox::Ok);
+  layout.addWidget(&list);
+  layout.addWidget(&okCancel);
+
+  QObject::connect(&okCancel, &QDialogButtonBox::accepted, &listEditor, &QDialog::accept);
+  QObject::connect(&okCancel, &QDialogButtonBox::rejected, &listEditor, &QDialog::reject);
+
+  listEditor.setLayout(&layout);
+
+  QStringList items;
+  for(const rdcstr &dir : m_Ctx.Config().Python_StubDirs)
+  {
+    items.append(dir);
+  }
+
+  list.setItems(items);
+
+  int res = RDDialog::show(&listEditor);
+
+  if(res)
+  {
+    items = list.getItems();
+
+    rdcarray<rdcstr> newDirs;
+    newDirs.resize(items.size());
+    for(int i = 0; i < items.size(); i++)
+    {
+      newDirs[i] = items[i];
+    }
+
+    if(newDirs.size() > m_Ctx.Config().Python_StubDirs.size())
+      PythonContext::GenerateStubs(newDirs);
+
+    m_Ctx.Config().Python_StubDirs = newDirs;
+
+    m_Ctx.Config().Save();
+  }
+}
+
+void SettingsDialog::on_Python_DebugPyDirBrowse_clicked()
+{
+  QString dir = RDDialog::getExistingDirectory(this, tr("Choose location of debugpy module"),
+                                               m_Ctx.Config().Python_DebugPyDir);
+
+  // i18n-ignore: Python module filename or VS Code executable name.
+  if(!dir.isEmpty() && QDir(dir).exists() && QDir(dir).exists(lit("__init__.py")))
+  {
+    m_Ctx.Config().Python_DebugPyDir = dir;
+    ui->Python_DebugPyDir->setText(dir);
+  }
+
+  m_Ctx.Config().Save();
+}
+
+void SettingsDialog::on_Python_DebugPyDir_textEdited(const QString &dir)
+{
+  // i18n-ignore: Python module filename or VS Code executable name.
+  if((QDir(dir).exists() && QDir(dir).exists(lit("__init__.py"))) || dir.isEmpty())
+    m_Ctx.Config().Python_DebugPyDir = dir;
+
+  m_Ctx.Config().Save();
+}
+
+void SettingsDialog::on_Python_VSCodePathBrowse_clicked()
+{
+  QString dir = RDDialog::getExecutableFileName(
+      this, tr("Choose location of code executable"),
+      // i18n-ignore: Python module filename or VS Code executable name.
+      m_Ctx.Config().Python_VSCodePath, lit("code"));
+
+  if(!dir.isEmpty() && QFileInfo(dir).isExecutable())
+  {
+    m_Ctx.Config().Python_VSCodePath = dir;
+    ui->Python_VSCodePath->setText(dir);
+  }
+
+  m_Ctx.Config().Save();
+}
+
+void SettingsDialog::on_Python_VSCodePath_textEdited(const QString &path)
+{
+  if(QFileInfo(path).isExecutable() || path.isEmpty())
+    m_Ctx.Config().Python_DebugPyDir = path;
+
+  m_Ctx.Config().Save();
+}
+
+void SettingsDialog::on_Python_DebugEnabled_toggled(bool checked)
+{
+  m_Ctx.Config().Python_DebugEnabled = ui->Python_DebugEnabled->isChecked();
+
+  m_Ctx.Config().Save();
+}
+
+void SettingsDialog::on_Python_LaunchVSCode_toggled(bool checked)
+{
+  m_Ctx.Config().Python_LaunchVSCode = ui->Python_LaunchVSCode->isChecked();
+
+  m_Ctx.Config().Save();
+}
+
+void SettingsDialog::on_Python_PromptReloadUnchanged_toggled(bool checked)
+{
+  m_Ctx.Config().Python_PromptReloadUnchanged = ui->Python_PromptReloadUnchanged->isChecked();
+
+  m_Ctx.Config().Save();
+}
+
 // texture viewer
 void SettingsDialog::on_TextureViewer_PerTexSettings_toggled(bool checked)
 {
@@ -865,7 +1019,8 @@ void SettingsDialog::on_TextureViewer_ChooseShaderDirectories_clicked()
   listEditor.setWindowTitle(tr("Custom shaders search directories"));
   listEditor.setWindowFlags(listEditor.windowFlags() & ~Qt::WindowContextHelpButtonHint);
 
-  OrderedListEditor list(tr("Shaders Directory"), OrderedItemExtras::BrowseFolder);
+  OrderedListEditor list(tr("Shaders Directory"),
+                         OrderedItemExtras::BrowseFolder | OrderedItemExtras::Delete);
 
   QVBoxLayout layout;
   QDialogButtonBox okCancel;
@@ -900,6 +1055,8 @@ void SettingsDialog::on_TextureViewer_ChooseShaderDirectories_clicked()
     }
 
     m_Ctx.Config().TextureViewer_ShaderDirs = newDirs;
+
+    m_Ctx.Config().Save();
   }
 }
 

@@ -353,6 +353,7 @@ class BreadMCPTools:
             # This API session attaches external servers once below. Native
             # routes attach them inside the proxy instead.
             mcp_servers=(),
+            editor_python_enabled=self.config.native_shell_enabled,
         )
         if route is None:
             tools: dict[str, Any] = {}
