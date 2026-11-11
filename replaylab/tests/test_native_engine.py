@@ -23,6 +23,12 @@ from replaylab_agent.profiles import Profile
 
 
 @pytest.fixture(autouse=True)
+def scripted_sessions_do_not_require_installed_vendor_cli(monkeypatch):
+    """Session factories are local fakes; never resolve a developer's real CLI."""
+    monkeypatch.setattr(ProviderContext, "agent_argv", lambda self: ["offline-agent"])
+
+
+@pytest.fixture(autouse=True)
 def completed_general_review_for_existing_protocol_cases(monkeypatch):
     """These cases isolate transport/Shader rules; general review has its own integration suite."""
     from replaylab_agent.task_review import completion_review_state
