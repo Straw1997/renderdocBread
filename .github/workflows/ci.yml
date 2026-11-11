@@ -66,6 +66,11 @@ jobs:
         run: |
           & ./replaylab/output/build-inputs/environment/Scripts/python.exe -m pytest replaylab/tests/test_ai_configuration_native.py replaylab/tests/test_codex_startup_diagnostic.py replaylab/tests/test_codex_jsonl_transport.py replaylab/tests/test_process_env_resolution.py replaylab/tests/test_process_env.py replaylab/tests/test_agent_diagnostics.py replaylab/tests/test_cli_start_gate.py replaylab/tests/test_cli_ai_config.py replaylab/tests/test_subscription.py replaylab/tests/test_acp_extensions.py replaylab/tests/test_acp_connection_boundaries.py replaylab/tests/test_agent_acp_session.py replaylab/tests/test_selftest.py replaylab/tests/test_native_vendor.py replaylab/tests/test_agent_standards.py replaylab/tests/test_agent_trace_native.py replaylab/tests/test_public_progress_security.py replaylab/tests/test_skills.py replaylab/tests/test_portable_capabilities.py replaylab/tests/test_task_mcp_proxy.py replaylab/packaging/tests -q --junitxml="$env:RUNNER_TEMP/bread-tests.xml"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test AI length recovery and context retention
+        shell: pwsh
+        run: |
+          & ./replaylab/output/build-inputs/environment/Scripts/python.exe -m pytest replaylab/tests/test_context_management.py replaylab/tests/test_deepagents_framework_integration.py replaylab/tests/test_native_engine.py replaylab/tests/test_output_continuation.py replaylab/tests/test_task_input.py -q --junitxml="$env:RUNNER_TEMP/bread-length-recovery-tests.xml"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Test live edit shutdown and integration compatibility
         shell: pwsh
         run: |
@@ -79,3 +84,4 @@ jobs:
           path: |
             ${{ runner.temp }}/bread-tests.xml
             ${{ runner.temp }}/bread-mcp-tests.xml
+            ${{ runner.temp }}/bread-length-recovery-tests.xml

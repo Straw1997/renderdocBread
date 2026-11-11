@@ -741,6 +741,47 @@ class ACPMainAgentSessionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("cancel", [name for name, _values in holder["connection"].calls])
         self.assertEqual(result.text, "Authorized work continued.")
 
+    async def test_turn_limits_return_results_for_same_session_continuation(self) -> None:
+        for reason in ("max_tokens", "max_turn_requests"):
+            with self.subTest(reason=reason):
+                holder: dict[str, Any] = {}
+
+                async def script(conn: _Connection) -> Any:
+                    await conn.say("Saved partial work")
+                    return {"stopReason": reason}
+
+                with mock.patch.object(acp_session, "_load_acp_sdk", lambda: _fake_sdk(script, holder)):
+                    async with self._session(holder) as session:
+                        result = await session.prompt("continue the work")
+                        self.assertEqual(result.stop_reason, reason)
+                        self.assertEqual(result.final_text, "Saved partial work")
+                        self.assertNotIn("cancel", [name for name, _ in holder["connection"].calls])
+
+    async def test_compaction_requires_advertisement_and_keeps_maintenance_text_private(self) -> None:
+        holder: dict[str, Any] = {}
+        visible = []
+
+        async def script(conn: _Connection) -> Any:
+            await conn.say("PRIVATE_COMPACTION_SUMMARY")
+            return {"stopReason": "end_turn"}
+
+        with mock.patch.object(acp_session, "_load_acp_sdk", lambda: _fake_sdk(script, holder)):
+            async with self._session(holder) as session:
+                self.assertFalse(await session.compact_context())
+                connection = holder["connection"]
+                await connection.client.session_update("other-session", {
+                    "sessionUpdate": "available_commands_update", "availableCommands": [{"name": "compact"}]})
+                self.assertFalse(await session.compact_context())
+                await connection.client.session_update("sess-1", {
+                    "sessionUpdate": "available_commands_update", "availableCommands": [{"name": "compact"}]})
+                session._state.on_delta = visible.append
+                self.assertTrue(await session.compact_context())
+                self.assertEqual(visible, [])
+                await connection.client.session_update("sess-1", {
+                    "sessionUpdate": "available_commands_update", "availableCommands": []})
+                self.assertFalse(await session.compact_context())
+                self.assertEqual(len([name for name, _ in connection.calls if name == "prompt"]), 1)
+
     async def test_unexpected_stop_reason_raises(self) -> None:
         holder: dict[str, Any] = {}
 

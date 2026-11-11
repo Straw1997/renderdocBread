@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "replaylab-agenthost"
-version = "1.13.135"
+version = "1.13.136"
 description = "Out-of-process AI provider and agent host for RenderDocUltra's built-in ReplayLab integration"
 readme = "README.md"
 requires-python = ">=3.12"

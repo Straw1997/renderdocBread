@@ -718,6 +718,15 @@ for line in sys.stdin:
                 item.update(status="completed", result={"ok": True, "content": [
                     {"type": "image", "mimeType": "image/png", "data": "a" * (5 * 1024 * 1024)}]})
                 send({"method": "item/completed", "params": {**event, "item": item}})
+            if mode.startswith("snapshot-"):
+                phase = mode.removeprefix("snapshot-")
+                text = "x" * (5 * 1024 * 1024) if phase == "oversized" else "Snapshot answer"
+                if phase == "oversized":
+                    phase = "final_answer"
+                send({"method": "turn/completed", "params": {"threadId": "thread-test",
+                      "turn": {"id": "turn-test", "status": "completed", "error": None,
+                               "items": [{"type": "agentMessage", "phase": phase, "text": text}]}}})
+                continue
             answer = ("x" * (5 * 1024 * 1024) if mode == "large-agent-record" else
                       "x" * 100_000 if mode == "large-line" else "evidence answer")
             deltas = ["x" * 8192] * 129 if mode == "many-deltas" else ["evidence "]

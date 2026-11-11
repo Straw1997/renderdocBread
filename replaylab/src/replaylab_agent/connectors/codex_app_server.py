@@ -3074,6 +3074,19 @@ class CodexAppServerConnector:
                     status, completed_turn.get("error"),
                     unfinished_tools=bool(unfinished_tool_ids) or untracked_tool,
                 )
+            # Some app-server versions deliver the authoritative answer only in
+            # the terminal turn snapshot, without a separate item/completed.
+            # Accept only an explicit final_answer; commentary and reasoning
+            # must never become the task's answer when an event was omitted.
+            items = completed_turn.get("items")
+            if isinstance(items, list):
+                for item in items:
+                    if (isinstance(item, Mapping) and item.get("type") == "agentMessage"
+                            and item.get("phase") == "final_answer" and isinstance(item.get("text"), str)):
+                        candidate = item["text"]
+                        checked_response_size(candidate)
+                        final_message = candidate
+                        streamed.clear()
             if not timeline_state.reasoning_observed:
                 await emit_reasoning_event(
                     item_id=_item_id(turn_id) or "turn",

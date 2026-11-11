@@ -44,6 +44,9 @@ from .response_language import configured_interface_locale, infer_response_langu
 from .agent_diagnostics import configure_logging, get_logger, log_exception, public_error
 from .agent_contracts import OrchestratorConfig, RunRequest, RunResult
 from .agent_progress import ProgressReporter
+from .output_continuation import OutputContinuationLoop, continuation_prompt, task_work_fingerprint, merge_answer_text
+from .context_management import (TRUNCATED_TOOLS_KEY, TaskInputArchive, configure_model_context,
+                                 context_middleware, input_budget, output_limit_reason)
 from .connectors.openai_compatibility import PROVIDER_RETRY_ATTEMPT
 from .agent_prompts import (
     deep_child_system_prompt,
@@ -656,10 +659,11 @@ class DeepAgentsEngine:
 
     def model(self, request: RunRequest) -> Any:
         if self._model_factory is not None:
-            return self._model_factory(request.profile, request.model)
-        from .connectors.langchain_models import build_chat_model
-
-        return build_chat_model(request.profile, model=request.model)
+            model = self._model_factory(request.profile, request.model)
+        else:
+            from .connectors.langchain_models import build_chat_model
+            model = build_chat_model(request.profile, model=request.model)
+        return configure_model_context(model, request.profile, request.model)
 
     def subagent_effects(self) -> tuple[str, ...]:
         # Effects are a connection-level ceiling; individual Host calls still
@@ -724,11 +728,16 @@ class _DeepRun:
         self._main_text: list[str] = []
         self._final_text = ""
         self._main_output_limited = False
+        self._limited_text = ""
+        self._unfinished_model_tools = False
         self._review_loop = TaskReviewLoop.for_intent(request.intent)
         self._review_decision = TaskReviewDecision()
         self._activity_calls: dict[str, tuple[str, Any]] = {}
         self._open_main_tools: set[str] = set()
         self._checkpointer: Any = None
+        self._input_archive: TaskInputArchive | None = None
+        self._context_model: Any = None
+        self._model_input_budget: int | None = None
         self._main_tool_calls = 0
         self._provider_output_seen = False
         self._workspace_root: Path | None = None
@@ -801,6 +810,11 @@ class _DeepRun:
         prompt += "\n\n" + self._workspace_guidance()
         spec: dict[str, Any] = {"name": name, "description": description, "tools": tools}
         spec["middleware"] = [self._shader_file_middleware(), *self._tool_image_middleware()]
+        if self._context_model is not None and self._workspace_root is not None:
+            # Children keep their delegated scope, not the root's pinned user
+            # prompt, while sharing the same size and unexecuted-call guards.
+            spec["middleware"].extend(context_middleware(
+                self._context_model, self._filesystem_backend(), TaskInputArchive(self._workspace_root)))
         spec[_subagent_prompt_key(self.engine.deepagents())] = prompt
         return spec
 
@@ -1143,6 +1157,11 @@ class _DeepRun:
 
         deepagents = self.engine.deepagents()
         backend = self._filesystem_backend()
+        model = self.engine.model(self.request)
+        self._context_model = model
+        self._model_input_budget = input_budget(model)
+        if self._input_archive is None:
+            self._input_archive = TaskInputArchive(self._workspace_root)
         envelope = parse_conversation_prompt(self.request.prompt)
         current = envelope.current_request
         language = infer_response_language(
@@ -1169,7 +1188,7 @@ class _DeepRun:
         if self._checkpointer is None:
             self._checkpointer = LatestCheckpointSaver()
         kwargs: dict[str, Any] = {
-            "model": self.engine.model(self.request),
+            "model": model,
             "tools": [
                 *self.local_skill_tools(),
                 self.ask_user_tool(),
@@ -1177,7 +1196,8 @@ class _DeepRun:
             "subagents": subagents,
             "backend": backend,
             "checkpointer": self._checkpointer,
-            "middleware": [self._shader_file_middleware(backend), *self._tool_image_middleware()],
+            "middleware": [self._shader_file_middleware(backend), *self._tool_image_middleware(),
+                           *context_middleware(model, backend, self._input_archive)],
         }
         kwargs[_create_prompt_key(create)] = system_prompt
         return create(**kwargs), listing
@@ -1320,6 +1340,8 @@ class _DeepRun:
                 self.request.intent, self.request.context
             ),
         )
+        if self._input_archive is not None:
+            text = self._input_archive.prepare(text, current_request=current, budget=self._model_input_budget)
         if not provider_input.attachments:
             return text, language
         content: list[dict[str, Any]] = [{"type": "text", "text": text}]
@@ -1416,7 +1438,9 @@ class _DeepRun:
             text = self.clarification.question
             status = "needs-user-input"
         else:
-            text = (self._final_text or "".join(self._main_text)).strip()
+            current_text = self._final_text or "".join(self._main_text)
+            text = ((self._limited_text or current_text)
+                    if self._main_output_limited else current_text).strip()
             reviewed_explanation = self._review_decision.reviewed_explanation() if not self._main_output_limited else ''
             if reviewed_explanation:
                 text = reviewed_explanation
@@ -1460,28 +1484,73 @@ class _DeepRun:
         """Keep Agent self-review in the same checkpointed graph and tool session."""
 
         heartbeat = asyncio.create_task(self._heartbeat())
+        output_loop = OutputContinuationLoop(task_work_fingerprint(self.receipt_store))
         try:
             while True:
                 remaining = self.config.main_timeout - (time.monotonic() - self._started)
                 if remaining <= 0:
                     raise asyncio.TimeoutError()
                 await asyncio.wait_for(self._stream(agent, prompt), timeout=remaining)
-                if self.clarification is not None or self._main_output_limited:
+                if self.clarification is not None:
                     break
-                self._review_decision = self._review_loop.decide(
-                    completion_review_state(self.receipt_store, self._activity_tracker), review_state(self.receipt_store))
                 # Normal graph completion has no pending nodes or tools. Never
                 # add a follow-up to a checkpoint which could re-run an effect.
                 pending = bool(self._open_main_tools or self._active)
+                model_tools_pending = self._unfinished_model_tools
+                quarantined_proposal = False
                 get_state = getattr(agent, "aget_state", None)
                 if callable(get_state):
                     try:
                         state = await get_state(self._stream_config())
-                        pending = pending or bool(getattr(state, "next", ()))
+                        next_nodes = getattr(state, "next", None)
+                        values = getattr(state, "values", None)
+                        messages = values.get("messages", []) if isinstance(values, Mapping) else []
+                        last = messages[-1] if messages else None
+                        if (last is not None and (getattr(last, "response_metadata", {}) or {}).get(TRUNCATED_TOOLS_KEY)
+                                and not getattr(last, "tool_calls", None) and not getattr(last, "invalid_tool_calls", None)):
+                            # The middleware stopped this proposal before any
+                            # tool ran. It is safe to ask for smaller calls.
+                            model_tools_pending = False
+                            quarantined_proposal = True
+                        pending = pending or next_nodes is None or bool(next_nodes)
                     except Exception:
                         # Without a readable checkpoint it is unsafe to append
                         # a turn that might resume unfinished effectful nodes.
                         pending = True
+                elif self._main_output_limited:
+                    # Explicit truncation recovery requires proof that appending
+                    # a message cannot resume unfinished effectful graph nodes.
+                    pending = True
+                pending = pending or model_tools_pending
+                if self._main_output_limited:
+                    if not quarantined_proposal:
+                        self._limited_text = merge_answer_text(self._limited_text, self._final_text or "".join(self._main_text))
+                    if pending:
+                        get_logger().warning("API output continuation deferred: unfinished work or unverified checkpoint")
+                        break
+                    current_text = self._final_text or "".join(self._main_text)
+                    if not output_loop.should_continue(current_text, task_work_fingerprint(self.receipt_store)):
+                        get_logger().warning("API output continuation stalled: no new work or answer for %d turns",
+                                             output_loop.no_progress_turns)
+                        break
+                    get_logger().info("API output truncated; continuing the same checkpoint (continuation=%d stalled=%d)",
+                                      output_loop.continuations, output_loop.no_progress_turns)
+                    prompt = continuation_prompt("max_tokens")
+                    self._main_text.clear()
+                    self._final_text = ""
+                    self._main_output_limited = False
+                    continue
+                output_loop.normal_turn()
+                current_text = self._final_text or "".join(self._main_text)
+                if not current_text.strip() and self._limited_text:
+                    # An empty normal turn does not complete an earlier cut-off
+                    # answer. Retain its text as partial, without another loop.
+                    self._main_output_limited = True
+                    break
+                if current_text.strip() and self._limited_text:
+                    self._final_text = merge_answer_text(self._limited_text, current_text)
+                self._review_decision = self._review_loop.decide(
+                    completion_review_state(self.receipt_store, self._activity_tracker), review_state(self.receipt_store))
                 if pending:
                     self._review_decision = replace(self._review_decision, action="partial", reason="unfinished-tools")
                     break
@@ -1489,6 +1558,7 @@ class _DeepRun:
                     break
                 emit_task_review(self.reporter, self._review_decision)
                 prompt = self._review_decision.continuation_prompt()
+                self._limited_text = ""
                 self._main_text.clear()
                 self._final_text = ""
         except asyncio.TimeoutError as exc:
@@ -1549,6 +1619,7 @@ class _DeepRun:
                 self._main_text.clear()
                 self._final_text = ""
                 self._main_output_limited = False
+                self._unfinished_model_tools = False
                 self.reporter.discard_main_message()
             return
 
@@ -1561,6 +1632,7 @@ class _DeepRun:
                 self._main_text.clear()
                 self._final_text = ""
                 self._main_output_limited = False
+                self._limited_text = ""
             arguments = data.get("input") if isinstance(data.get("input"), Mapping) else {}
             nested_name = (
                 str(arguments.get("name") or "").strip()
@@ -1636,17 +1708,27 @@ class _DeepRun:
         if kind == "on_chat_model_end" and child is None:
             self._provider_output_seen = True
             message = data.get("output")
-            if message is not None and not getattr(message, "tool_calls", None):
-                metadata = getattr(message, "response_metadata", None)
-                metadata = metadata if isinstance(metadata, Mapping) else {}
-                incomplete = metadata.get("incomplete_details")
-                incomplete = incomplete if isinstance(incomplete, Mapping) else {}
-                reason = str(metadata.get("finish_reason") or metadata.get("stop_reason")
-                             or incomplete.get("reason") or "").lower()
-                self._main_output_limited = reason in {"length", "max_tokens", "max_output_tokens"}
-                text = _message_text(message).strip()
-                if text:
-                    self._final_text = text
+            if message is not None:
+                self._unfinished_model_tools = bool(getattr(message, "tool_calls", None)
+                                                    or getattr(message, "invalid_tool_calls", None))
+                reason = output_limit_reason(message)
+                self._main_output_limited = bool(reason)
+                if self._main_output_limited:
+                    usage = getattr(message, "usage_metadata", None) or {}
+                    usage = usage if isinstance(usage, Mapping) else {}
+                    output_details = usage.get("output_token_details")
+                    output_details = output_details if isinstance(output_details, Mapping) else {}
+                    get_logger().info(
+                        "API output limit: protocol=%s reason=%s textChars=%d "
+                        "maxOutputTokens=%s outputTokens=%s reasoningTokens=%s",
+                        self.request.profile.provider.protocol, reason, len(_message_text(message)),
+                        self.request.profile.options.get("max_output_tokens", "provider-default"),
+                        usage.get("output_tokens", "unknown"), output_details.get("reasoning", "unknown"),
+                    )
+                if not self._unfinished_model_tools:
+                    text = _message_text(message)
+                    if text.strip():
+                        self._final_text = text
             return
 
     def _start_child(self, run_id: str, arguments: Mapping[str, Any]) -> None:
