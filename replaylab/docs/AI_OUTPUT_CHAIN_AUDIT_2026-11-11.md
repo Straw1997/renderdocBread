@@ -135,7 +135,15 @@ Codex JSONL、账号/容量恢复、工具与检查点、profile、对话传输�
 3 条弃用警告，没有失败。原生输入存储权限收紧后，针对性回归另有
 68 passed、1 skipped。用量日志测试也验证了推理 token 计数且不记录推理正文。
 
-在装好项目测试依赖的 Python 环境中，从仓库根目录复现此范围：
+合入最新主分支并补充摘要质量门禁后的完整 Agent/打包回归为 **2018 passed、
+20 skipped、6 个 subtest 通过**；相关 MCP 回归为 **246 passed、7 个
+subtest 通过**。新的持续集成长度恢复专项为 **133 passed**。完整回归的
+跳过项主要涉及 Windows 符号链接权限、显式启用的 Codex 生命周期、需要
+发行环境的依赖包/Qt 对象以及其他平台的编译器；发行包另外执行实际重定位
+检查。原生相机测试使用源码未变化的已验证 1.13.135 核心工件，Qt 探针使用
+仓库 SDK 的相邻运行库。3 条既有 MCP 弃用警告保留，没有新增失败。
+
+在装好项目测试依赖的 Python 环境中，从仓库根目录复现上述链路子集：
 
 ```powershell
 $chainTests = Get-ChildItem -LiteralPath replaylab/tests -File -Filter 'test_*.py' |
