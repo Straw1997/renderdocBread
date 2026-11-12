@@ -3,9 +3,24 @@ import json
 from pathlib import Path
 import sys
 import zipfile
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import build_compact_release as release
+import version_policy
+
+
+@pytest.fixture(autouse=True)
+def fixture_versions(monkeypatch):
+    identity = version_policy.release_identity()
+    # Archive composition fixtures use byte strings in place of a native EXE.
+    # Real metadata and --version rejection are exercised by test_version_policy.
+    monkeypatch.setattr(release, "check_versions", lambda repo: identity)
+    def validate_runtime(version, **kwargs):
+        assert version == identity["version"]
+        return identity
+    monkeypatch.setattr(release, "validate_runtime_version", validate_runtime)
+    monkeypatch.setattr(release, "validate_gui_version", lambda gui, version: None)
 
 
 
@@ -17,7 +32,8 @@ def _fake_runtime(runtime):
         path.write_bytes(b"runtime")
         files.append({"path": name, "size": path.stat().st_size, "sha256": release.digest(path)})
     (runtime / "replaylab-runtime-manifest.json").write_text(
-        json.dumps({"sourceInputsSha256": "source", "files": files}))
+        json.dumps({"sourceInputsSha256": "source", "files": files,
+                    "version": version_policy.release_identity()["version"]}))
 
 
 def test_compact_rewrite_removes_old_payload_and_preserves_exact_dependency_inventory(tmp_path, monkeypatch):

@@ -302,10 +302,11 @@ public:
                          .arg(paramcol.blue(), 2, 16, QLatin1Char('0'));
   }
 
-  void ResetModel()
+  void ResetModel(bool captureAvailable = true)
   {
     emit beginResetModel();
-    emit endResetModel();
+
+    m_CaptureAvailable = false;
 
     m_Nodes.clear();
     m_RowInParentCache.clear();
@@ -315,10 +316,11 @@ public:
     m_Chunks.clear();
     m_Times.clear();
 
-    if(!m_Ctx.CurRootActions().empty())
+    if(captureAvailable && !m_Ctx.CurRootActions().empty())
       m_Nodes[0] = CreateActionNode(NULL);
 
-    m_CurrentEID = createIndex(0, 0, TagCaptureStart);
+    m_CaptureAvailable = captureAvailable && m_Ctx.IsCaptureLoaded();
+    m_CurrentEID = m_CaptureAvailable ? createIndex(0, 0, TagCaptureStart) : QModelIndex();
 
     m_Bookmarks.clear();
     m_BookmarkIndices.clear();
@@ -327,12 +329,13 @@ public:
     m_FindString.clear();
     m_FindEIDSearch = false;
 
+    emit endResetModel();
     RefreshCache();
   }
 
   void RefreshCache()
   {
-    if(!m_Ctx.IsCaptureLoaded())
+    if(!m_CaptureAvailable)
       return;
 
     uint32_t eid = m_Ctx.CurSelectedEvent();
@@ -707,7 +710,7 @@ public:
 
   QModelIndex index(int row, int column, const QModelIndex &parent = QModelIndex()) const override
   {
-    if(!m_Ctx.IsCaptureLoaded())
+    if(!m_CaptureAvailable)
       return QModelIndex();
 
     // create fake root if the parent is invalid
@@ -742,7 +745,7 @@ public:
 
   QModelIndex parent(const QModelIndex &index) const override
   {
-    if(!m_Ctx.IsCaptureLoaded() || !index.isValid() || index.internalId() == TagRoot)
+    if(!m_CaptureAvailable || !index.isValid() || index.internalId() == TagRoot)
       return QModelIndex();
 
     // Capture Start's parent is the root
@@ -767,7 +770,7 @@ public:
 
   int rowCount(const QModelIndex &parent = QModelIndex()) const override
   {
-    if(!m_Ctx.IsCaptureLoaded())
+    if(!m_CaptureAvailable)
       return 0;
 
     // only one root
@@ -819,7 +822,7 @@ public:
 
   QVariant data(const QModelIndex &index, int role = Qt::DisplayRole) const override
   {
-    if(!index.isValid())
+    if(!m_CaptureAvailable || !index.isValid())
       return QVariant();
 
     if(role == Qt::DecorationRole)
@@ -1049,6 +1052,10 @@ private:
   QString m_ParamColCode;
 
   QMap<uint32_t, int> m_MessageCounts;
+
+  // CaptureContext notifies viewers before freeing its replay-owned action tree.
+  // A closed model must stay empty even while that context still reports loaded.
+  bool m_CaptureAvailable = false;
 
   // captures could have a lot of events, 1 million is high but not unreasonable and certainly not
   // an upper bound. We store only 1 pointer per event which gives us reasonable memory usage (i.e.
@@ -4221,7 +4228,7 @@ void EventBrowser::OnCaptureClosed()
   // older Qt versions lose all the sections when a model resets even if the sections don't change.
   // Manually save/restore them
   QVariant p = persistData();
-  m_Model->ResetModel();
+  m_Model->ResetModel(false);
   setPersistData(p);
 
   ui->find->setEnabled(false);

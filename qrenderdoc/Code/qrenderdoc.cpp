@@ -32,6 +32,7 @@
 #include <QRegularExpressionMatch>
 #include <QStandardPaths>
 #include <QSysInfo>
+#include "Code/BreadVersion.h"
 #include "Code/CaptureContext.h"
 #include "Code/QRDUtils.h"
 #include "Code/Resources.h"
@@ -223,7 +224,7 @@ int main(int argc, char *argv[])
       Qt::HighDpiScaleFactorRoundingPolicy::RoundPreferFloor);
 #endif
 
-  QApplication::setApplicationVersion(lit(FULL_VERSION_STRING));
+  QApplication::setApplicationVersion(lit(BREAD_FULL_VERSION_STRING));
 
 // shortcut here so we can run this with a non-GUI application
 #if ENABLE_UNIT_TESTS

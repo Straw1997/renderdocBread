@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import json
 import os
 import sys
@@ -25,6 +26,31 @@ from replaylab_agent.policy import (
 )
 from replaylab_agent.skill_gateway import DIRECTORY_TOOL, INVOKE_TOOL
 from replaylab_agent.tool_scope import ToolCallScope
+
+
+@pytest.fixture
+def regular_python(tmp_path):
+    # Production resolves a regular BreadMCP launcher. On POSIX sys.executable
+    # is often a symlink, so it cannot stand in for that admitted Host path.
+    # Preserve a venv's interpreter identity through a regular test launcher.
+    if sys.prefix == sys.base_prefix or os.name == "nt":
+        return str(Path(sys.executable).resolve())
+    launcher = tmp_path / "python-host"
+    launcher.write_text("#!" + sys.executable + "\nimport os, sys\n"
+                        "os.execv(sys.executable, [sys.executable, *sys.argv[1:]])\n", encoding="utf-8")
+    launcher.chmod(0o700)
+    return str(launcher)
+
+
+@contextmanager
+def proxy_stderr(path):
+    with path.open("w", encoding="utf-8") as stream:
+        try:
+            yield stream
+        except BaseException:
+            stream.flush()
+            print(path.read_text(encoding="utf-8", errors="replace")[-6000:], file=sys.stderr)
+            raise
 
 
 def _args(host: Path, registry: Path, *extra: str):
@@ -162,13 +188,13 @@ def test_runtime_host_drift_only_hides_affected_operations(monkeypatch) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("full_host_catalog", [False, True])
 async def test_partial_host_starts_and_unknown_tools_never_reach_upstream(
-    tmp_path: Path, full_host_catalog: bool,
+    tmp_path: Path, full_host_catalog: bool, regular_python,
 ) -> None:
     from mcp import ClientSession
     from mcp.client.stdio import StdioServerParameters, stdio_client
 
     fixture = Path(__file__).parent / "fixtures" / "fake_partial_mcp_host.py"
-    args = ["-m", "replaylab_agent.mcp_proxy", "--host", sys.executable,
+    args = ["-m", "replaylab_agent.mcp_proxy", "--host", regular_python,
             "--host-arg", str(fixture), "--instance-id", "partial-host-test",
             "--registry-path", str((tmp_path / "registry.json").resolve()),
             "--allow", "inspect_event", "--allow", "compile_shader_workspace",
@@ -177,7 +203,7 @@ async def test_partial_host_starts_and_unknown_tools_never_reach_upstream(
     if full_host_catalog:
         args.append("--full-host-catalog")
     parameters = StdioServerParameters(command=sys.executable, args=args, env=dict(os.environ))
-    with (tmp_path / "partial-host.stderr.log").open("w", encoding="utf-8") as errlog:
+    with proxy_stderr(tmp_path / "partial-host.stderr.log") as errlog:
         async with stdio_client(parameters, errlog=errlog) as streams:
             async with ClientSession(*streams) as session:
                 await session.initialize()
@@ -204,7 +230,7 @@ async def test_partial_host_starts_and_unknown_tools_never_reach_upstream(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_skill_root", [True, False])
 async def test_proxy_exposes_core_tools_and_discovers_long_tail(
-    tmp_path: Path, with_skill_root: bool
+    tmp_path: Path, with_skill_root: bool, regular_python,
 ) -> None:
     from mcp import ClientSession
     from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -222,7 +248,7 @@ async def test_proxy_exposes_core_tools_and_discovers_long_tail(
             "-m",
             "replaylab_agent.mcp_proxy",
             "--host",
-            sys.executable,
+            regular_python,
             "--host-arg=-m",
             "--host-arg=src.server",
             "--allow-env",
@@ -248,7 +274,7 @@ async def test_proxy_exposes_core_tools_and_discovers_long_tail(
 
     # MCP captures its default stderr at import time. Earlier capture tests may
     # have supplied a stream without fileno; a real subprocess needs a real file.
-    with (tmp_path / "mcp-stderr.log").open("w", encoding="utf-8") as errlog:
+    with proxy_stderr(tmp_path / "mcp-stderr.log") as errlog:
         async with stdio_client(parameters, errlog=errlog) as streams:
             async with ClientSession(*streams) as session:
                 await session.initialize()
@@ -480,7 +506,7 @@ async def test_cancelled_or_failed_effect_releases_the_next_mutation() -> None:
 
 @pytest.mark.asyncio
 async def test_same_client_session_can_poll_while_long_host_call_runs(
-    tmp_path: Path,
+    tmp_path: Path, regular_python,
 ) -> None:
     from mcp import ClientSession
     from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -494,7 +520,7 @@ async def test_same_client_session_can_poll_while_long_host_call_runs(
         command=sys.executable,
         args=[
             "-m", "replaylab_agent.mcp_proxy",
-            "--host", sys.executable,
+            "--host", regular_python,
             "--host-arg", str(fixture_host),
             "--allow", "compile_shader_workspace",
             "--allow", "get_host_runtime_status",
@@ -505,9 +531,7 @@ async def test_same_client_session_can_poll_while_long_host_call_runs(
         ],
         env=environment,
     )
-    with (tmp_path / "mcp-concurrent-stderr.log").open(
-        "w", encoding="utf-8"
-    ) as errlog:
+    with proxy_stderr(tmp_path / "mcp-concurrent-stderr.log") as errlog:
         async with stdio_client(parameters, errlog=errlog) as streams:
             async with ClientSession(*streams) as session:
                 await session.initialize()
@@ -528,7 +552,7 @@ async def test_same_client_session_can_poll_while_long_host_call_runs(
 
 @pytest.mark.asyncio
 async def test_same_client_session_serializes_two_effect_mutations(
-    tmp_path: Path,
+    tmp_path: Path, regular_python,
 ) -> None:
     from mcp import ClientSession
     from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -541,7 +565,7 @@ async def test_same_client_session_serializes_two_effect_mutations(
         command=sys.executable,
         args=[
             "-m", "replaylab_agent.mcp_proxy",
-            "--host", sys.executable,
+            "--host", regular_python,
             "--host-arg", str(fixture_host),
             "--allow", "compile_shader_workspace",
             "--allow", "get_host_runtime_status",
@@ -552,7 +576,7 @@ async def test_same_client_session_serializes_two_effect_mutations(
         ],
         env=environment,
     )
-    with (tmp_path / "mcp-effects-stderr.log").open("w", encoding="utf-8") as errlog:
+    with proxy_stderr(tmp_path / "mcp-effects-stderr.log") as errlog:
         async with stdio_client(parameters, errlog=errlog) as streams:
             async with ClientSession(*streams) as session:
                 await session.initialize()
@@ -575,7 +599,7 @@ async def test_same_client_session_serializes_two_effect_mutations(
 
 @pytest.mark.asyncio
 async def test_proxy_spills_one_large_effect_receipt_without_retrying_it(
-    tmp_path: Path,
+    tmp_path: Path, regular_python,
 ) -> None:
     from mcp import ClientSession
     from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -593,7 +617,7 @@ async def test_proxy_spills_one_large_effect_receipt_without_retrying_it(
         command=sys.executable,
         args=[
             "-m", "replaylab_agent.mcp_proxy",
-            "--host", sys.executable,
+            "--host", regular_python,
             "--host-arg", str(fixture_host),
             "--allow", "compile_shader_workspace",
             "--allow", "get_host_runtime_status",
@@ -604,7 +628,7 @@ async def test_proxy_spills_one_large_effect_receipt_without_retrying_it(
         ],
         env=environment,
     )
-    with (tmp_path / "mcp-large-stderr.log").open("w", encoding="utf-8") as errlog:
+    with proxy_stderr(tmp_path / "mcp-large-stderr.log") as errlog:
         async with stdio_client(parameters, errlog=errlog) as streams:
             async with ClientSession(*streams) as session:
                 await session.initialize()

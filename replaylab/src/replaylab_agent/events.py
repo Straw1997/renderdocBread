@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -20,6 +21,9 @@ _TAIL_READ_BYTES = 64 * 1024
 _MAX_LAST_EVENT_BYTES = 16 * 1024 * 1024
 _ARTIFACT_RETENTION_SECONDS = 7 * 24 * 60 * 60
 _MAX_PRUNE_ENTRIES = 4096
+_DELTA_FLUSH_SECONDS = 0.1
+_DELTA_CHARS = 8 * 1024
+_DELTA_KINDS = frozenset({"message-delta", "agent-message-delta", "reasoning-delta"})
 _SENSITIVE_KEY_RE = re.compile(
     r"(?:api[_-]?key|authorization|cookie|credential|password|secret|token)", re.IGNORECASE
 )
@@ -153,7 +157,76 @@ class TaskEventWriter:
             raise ValueError("task_id contains unsafe path characters")
         _prune_stale_task_events(self.root)
         self._sequence = self._last_sequence()
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._pending_delta: tuple[TaskEventKind, dict[str, Any]] | None = None
+        self._delta_timer: threading.Timer | None = None
+
+    def emit_delta(self, kind: TaskEventKind, **values: Any) -> None:
+        """Coalesce a contiguous provider stream, with at most 100ms latency.
+
+        The public/disk protocol stays v1. Context, item identity, reset and
+        lifecycle boundaries are never merged. A synchronous event (including
+        terminal delivery) first persists all preceding text. Sequence numbers
+        are allocated under the existing cross-process lock at persistence.
+        """
+        if kind not in _DELTA_KINDS:
+            raise ValueError("emit_delta requires a public text delta")
+        # Own the metadata: provider callbacks may reuse/mutate their objects.
+        values = _redact(values)
+        with self._lock:
+            self._check_not_deleted()
+            data = values.get("data") or {}
+            immediate = (data.get("reset") is True or data.get("stream") == "final"
+                         or data.get("lifecycle") in {"completed", "failed", "cancelled", "canceled"})
+            context = {key: value for key, value in values.items() if key != "text"}
+            if self._pending_delta is not None:
+                old_kind, old_values = self._pending_delta
+                old_context = {key: value for key, value in old_values.items() if key != "text"}
+                if not immediate and kind == old_kind and context == old_context:
+                    if len(old_values.get("text", "")) + len(values.get("text", "")) <= _DELTA_CHARS:
+                        old_values["text"] = old_values.get("text", "") + values.get("text", "")
+                        return
+                self._flush_delta_locked()
+            if immediate or len(values.get("text", "")) >= _DELTA_CHARS:
+                self.emit(kind, **values)
+                return
+            self._pending_delta = (kind, values)
+            timer = threading.Timer(_DELTA_FLUSH_SECONDS, self._flush_delta_timer)
+            timer.daemon = True
+            self._delta_timer = timer
+            timer.start()
+
+    def flush(self) -> None:
+        with self._lock:
+            self._flush_delta_locked()
+
+    def _flush_delta_timer(self) -> None:
+        with self._lock:
+            # A canceled timer may already be waiting for this lock. It must
+            # never flush a newer stream in place of its own pending batch.
+            if self._delta_timer is not threading.current_thread():
+                return
+            try:
+                self._flush_delta_locked()
+            except Exception:
+                # Keep the batch for the next synchronous call to retry/raise.
+                # Background I/O failure must never discard an acknowledged
+                # final delivery or resurrect a deleted conversation.
+                logging.getLogger(__name__).exception("Task stream flush failed")
+
+    def _flush_delta_locked(self) -> None:
+        if self._delta_timer is not None:
+            self._delta_timer.cancel()
+            self._delta_timer = None
+        pending = self._pending_delta
+        if pending is None:
+            return
+        self._pending_delta = None
+        try:
+            self.emit(pending[0], **pending[1])
+        except Exception:
+            self._pending_delta = pending
+            raise
 
     @property
     def path(self) -> Path:
@@ -174,6 +247,7 @@ class TaskEventWriter:
         if delivery_id and not _DELIVERY_ID_RE.fullmatch(delivery_id):
             raise ValueError("delivery_id contains unsafe characters")
         with self._lock:
+            self._flush_delta_locked()
             self._check_not_deleted()
             with _exclusive_path_lock(self.path.with_suffix(".jsonl.lock")):
                 self._check_not_deleted()

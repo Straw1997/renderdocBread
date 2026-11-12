@@ -16,6 +16,7 @@ from pathlib import Path
 from build_fs import long_path, logical_path, temporary_directory
 from file_hashes import digest, warm_digests
 from host_runtime import MANIFEST as HOST_MANIFEST, SUPPORT as HOST_SUPPORT, runtime_paths
+from version_policy import synchronize as check_versions, validate_runtime_version, validate_gui_output
 
 REPO = Path(__file__).resolve().parents[2]
 SKIP_DIRS = {"__pycache__", ".git", ".venv", "obj", ".uex-cache", ".uex-analysis",
@@ -207,7 +208,7 @@ def audit(root, config):
         raise ValueError("Release audit failed:\n" + "\n".join(errors))
 
 
-def smoke(root):
+def smoke(root, expected_version=None):
     env = dict(os.environ)
     for key in list(env):
         if key.startswith(("REPLAYLAB_", "BREAD_", "QT_", "PYTHON", "CODEX_", "SKY_", "NODE_REPL_", "BROWSER_USE_", "CUA_")) or key in {"VIRTUAL_ENV", "NODE_PATH", "NODE_OPTIONS"}:
@@ -241,6 +242,8 @@ def smoke(root):
                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         if result.returncode:
             raise ValueError(f"Relocation smoke failed: {command[0].name}\n{result.stdout[-3000:]}\n{result.stderr[-3000:]}")
+        if command[0].name == "RenderDocBread.exe" and expected_version is not None:
+            validate_gui_output(result, expected_version)
         print(f"Relocation smoke passed: {command[0].name}", flush=True)
         if "--verify-execution" in command:
             details = json.loads(result.stdout)
@@ -275,6 +278,10 @@ def verify_compilers(root):
 def assemble(application, gui, runtime, uex, crt, destination, config, audit_only=False, unity_mcp=None, capabilities=None):
     profile = read_json(capabilities / "bread-capabilities.json").get("distributionProfile", "extended") if capabilities else "core"
     version = read_json(runtime / HOST_MANIFEST).get("version")
+    identity = None
+    if "versioning" in config or profile == "standard":
+        check_versions(REPO)
+        identity = validate_runtime_version(version, repo=REPO, config=config)
     archive_name = standard_update_archive_name(config, version) if profile == "standard" else None
     destination.mkdir(parents=True, exist_ok=True)
     # Unique, disposable staging only. Never clean, deploy to, or rename the source application.
@@ -368,7 +375,8 @@ def assemble(application, gui, runtime, uex, crt, destination, config, audit_onl
         audit(root, config)
         # Provider and DXC verification are build-side checks against staged bytes only.
         verify_compilers(root)
-        checked = smoke(logical_path(root)) or []
+        checked = smoke(logical_path(root), version) if identity else smoke(logical_path(root))
+        checked = checked or []
         warm_digests(release_files(root))
         audit(root, config)  # tools must not leave caches or machine-specific configuration
         records = [{"path": p.relative_to(root).as_posix(), "size": p.stat().st_size, "sha256": digest(p)}
@@ -377,6 +385,7 @@ def assemble(application, gui, runtime, uex, crt, destination, config, audit_onl
         write_json(root / "RenderDocBread.manifest.json", {"schema": manifest_schema,
                    "product": config["product"], "platform": config["platform"],
                    "breadVersion": version,
+                   **({"versioning": identity} if identity else {}),
                    "profile": profile,
                    "createdUtc": datetime.now(timezone.utc).isoformat(), "files": records})
         audit_receipt = destination / ("RenderDocBread-audit-" + datetime.now().strftime("%Y%m%d-%H%M%S") + ".json")

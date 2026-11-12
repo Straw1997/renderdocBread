@@ -296,7 +296,7 @@ def capture_one(api, demo, output, timeout, frame, compiler_dir, layer_manifest,
         process_api = WindowsProcessAPI() if os.name == "nt" else None
         launch_before = process_api.now() if process_api else None
         result = rd.ExecuteAndInject(str(demo), str(demo.parent), command, envmods,
-                                     str(output / tests[api]), rd.GetDefaultCaptureOptions(), False)
+                                     str(output / tests[api]), rd.CaptureOptions(), False)
         launch_after = process_api.now() if process_api else None
         if process_api:
             entry["launchWindow"] = {"earliestFileTime100ns": launch_before,

@@ -531,7 +531,7 @@ def _has_one(value: dict, *keys: str) -> bool:
     return any(key in value for key in keys)
 
 
-def _records_have_physical_keys(values: list, kind: str) -> bool:
+def _records_have_physical_keys(values: list, kind: str, *, output: bool = False) -> bool:
     for value in values:
         if not isinstance(value, dict):
             return False
@@ -635,7 +635,10 @@ def _records_have_physical_keys(values: list, kind: str) -> bool:
                 )
                 or not isinstance(value.get("perPrimitiveRate"), bool)
                 or not isinstance(value.get("needSemanticIndex"), bool)
-                or used_mask & ~register_mask
+                # DXBC outputs retain the raw never-written mask, whose bits
+                # may be outside the declared lanes. Match the workspace ABI
+                # parser while keeping input usage and physical masks strict.
+                or (not output and used_mask & ~register_mask)
                 or (
                     component_count
                     and register_mask.bit_count() != component_count
@@ -777,7 +780,7 @@ def interface_is_complete(shader: dict) -> bool:
         return False
     if not _records_have_physical_keys(shader["inputSignature"], "signature"):
         return False
-    if not _records_have_physical_keys(shader["outputSignature"], "signature"):
+    if not _records_have_physical_keys(shader["outputSignature"], "signature", output=True):
         return False
     if not _signatures_are_unique(shader["inputSignature"]):
         return False

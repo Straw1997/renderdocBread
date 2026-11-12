@@ -1161,7 +1161,8 @@ class ShaderWorkspaceAbiGateTests(unittest.TestCase):
         self.assertFalse(status["latestCompiled"]["abiCompatible"])
         with self.assertRaisesRegex(ManifestValidationError, "recorded comparison"):
             service._current_rejected_abi_attempt(
-                Path(workspace), json.loads(manifest_path.read_text(encoding="utf-8")))
+                service._workspace_root(workspace),
+                json.loads(manifest_path.read_text(encoding="utf-8")))
 
     def test_workspace_report_tampering_is_rejected(self) -> None:
         service, workspace, unused_created, compiled, interface = (

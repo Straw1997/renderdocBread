@@ -20,6 +20,7 @@ from package_portable import copy_tree, release_files, zip_compress_type
 from prepare_capabilities_bundle import verify
 from runtime_inputs import fingerprint, REPO
 from host_runtime import SUPPORT, runtime_paths
+from version_policy import synchronize as check_versions, validate_runtime_version, validate_gui_version
 
 PREFIX = "RenderDocBread/"
 CAPS = "replaylab/tools/capabilities/"
@@ -49,6 +50,9 @@ def compose(base, capabilities, runtime, gui, output, *, replay_bindings=None, r
     hosts = json.loads((runtime / "replaylab-runtime-manifest.json").read_text(encoding="utf-8-sig"))
     if hosts.get("sourceInputsSha256") != fingerprint():
         raise ValueError("Frozen runtime does not match current source inputs")
+    identity = check_versions(REPO)
+    validate_runtime_version(hosts.get("version"), repo=REPO)
+    validate_gui_version(gui, identity["version"])
     additions = {"RenderDocBread.exe": gui}
     if replay_core is not None:
         if replay_bindings is None:
@@ -123,6 +127,7 @@ def compose(base, capabilities, runtime, gui, output, *, replay_bindings=None, r
                 records[path] = record
             manifest.update(createdUtc=datetime.now(timezone.utc).isoformat(),
                             breadVersion=hosts.get("version"), profile=profile,
+                            versioning=identity,
                             files=sorted(records.values(), key=lambda r: r["path"]))
             new.writestr(PREFIX + "RenderDocBread.manifest.json", encoded(manifest))
     # Verify every released byte, including retained native dependencies.

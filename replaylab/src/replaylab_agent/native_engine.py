@@ -128,6 +128,7 @@ class NativeAgentEngine:
             preset=profile.preset,
             profile_title=profile.title or profile.preset,
             model=request.model or profile.model,
+            conversation_id=request.conversation_id or parse_conversation_prompt(request.prompt).conversation_id,
         )
         from .user_control import requests_pause, pause_reply
         if requests_pause(request.prompt):
@@ -965,7 +966,7 @@ class NativeAgentEngine:
             "reset": event.get("reset") is True,
             "lifecycle": lifecycle, "activityLifecycle": lifecycle,
         }
-        reporter.writer.emit("agent-message-delta", backend=reporter.backend,
+        reporter.writer.emit_delta("agent-message-delta", backend=reporter.backend,
                              profile=reporter.profile_id, text=text, data=data)
 
     @staticmethod

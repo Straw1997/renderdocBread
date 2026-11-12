@@ -7,6 +7,7 @@ import zipfile
 from build_fs import logical_path, temporary_directory
 
 from package_portable import audit, digest, read_json, smoke, verify_compilers
+from version_policy import validate_runtime_version
 
 
 def main():
@@ -28,13 +29,17 @@ def main():
                     raise ValueError("Release member escapes its root")
             package.extractall(stage)
         root = stage / "RenderDocBread"
+        manifest = read_json(root / "RenderDocBread.manifest.json")
+        identity = validate_runtime_version(manifest.get("breadVersion"))
+        if manifest.get("versioning") != identity:
+            raise ValueError("Release provenance differs from the configured version policy")
         audit(root, read_json(Path(__file__).with_name("RenderDocBread.package.json")))
         print("Relocated release audit passed", flush=True)
         verify_compilers(root)
         print("Relocated compiler capability checks passed", flush=True)
         # Extended paths are for build-side filesystem I/O. Older native
         # executables still need the normal spelling when creating processes.
-        checks = smoke(logical_path(root))
+        checks = smoke(logical_path(root), identity["version"])
         args.output.write_text(json.dumps({"ok": True, "archive": str(archive),
             "sha256": receipt["sha256"], "freshProfile": True, "developerPathRemoved": True,
             "checks": ["sealed-release-audit", "shader-compiler-capabilities", *checks]}, ensure_ascii=False, indent=2), encoding="utf-8")

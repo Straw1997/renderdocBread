@@ -145,7 +145,7 @@ class CaptureOwnershipTests(unittest.TestCase):
         from unittest.mock import MagicMock
         rd = fake_renderdoc()
         rd.ResultCode = SimpleNamespace(Succeeded="Succeeded")
-        rd.GetDefaultCaptureOptions = lambda: None
+        rd.CaptureOptions = lambda: None
         rd.ExecuteAndInject = MagicMock(return_value=SimpleNamespace(result="Succeeded", ident=12))
         control = MagicMock()
         control.GetPID.return_value = 42

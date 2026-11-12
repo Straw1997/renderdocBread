@@ -30,6 +30,22 @@ Host version. Other package profiles use timestamped names. The executable is
 Publish an update using the `autoUpdate` values in the package configuration and
 the [automatic update release contract](RELEASE_REQUIREMENTS.md#自动更新发布约定).
 
+Release identity follows `versioning` in `RenderDocBread.package.json`:
+`<integrated RenderDoc major>.<integrated RenderDoc minor>.<extensionRevision>`.
+The first two components come from `renderdoc/api/replay/version.h`, never the
+latest online release. Keep the extension revision increasing across upstream
+upgrades. After changing that one configured revision or integrating upstream,
+run `python replaylab/packaging/version_policy.py --write`; it updates the native
+Bread version header and all four Python version declarations. `--check` verifies
+the generated sources without writing, and both build entry points run that gate
+before compiling. Packaging does not increment or silently repair version metadata.
+The title, About, CLI version and Windows EXE resources share that header, while
+the core's upstream API/ABI version remains separate. Full and compact packages
+check actual GUI and Host versions and record upstream/revision provenance in
+the release manifest. A stale native EXE is rejected, including with skip-build
+options. Existing `1.13.xxx` updater versions remain numerically comparable with
+the new `1.46.xxx` series; do not rename historical tags or release archives.
+
 `RenderDocBread.package.json` is the checked-in release configuration. Paths in this
 configuration are relative to the repository or application; release manifests contain
 relative paths and hashes. Assembly uses an allowlist and a private OS temporary directory.

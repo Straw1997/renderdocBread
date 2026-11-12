@@ -90,9 +90,11 @@ def test_page_rejects_invalid_limits(offset, limit):
         outline.outline_page({"actions": [], "summary": {}}, offset, limit)
 
 
-@pytest.mark.parametrize("indices,instances,expected", [(3, 1, True), (0, 1, False), (3, 0, False)])
-def test_draw_work_uses_native_counts_even_when_display_name_says_otherwise(indices, instances, expected):
-    draw = action(5)
+@pytest.mark.parametrize("instanced", [False, True])
+@pytest.mark.parametrize("indices,instances", [(3, 1), (0, 1), (3, 0), (0, 0)])
+def test_draw_work_uses_native_counts_even_when_display_name_says_otherwise(indices, instances, instanced):
+    expected = indices > 0 and (not instanced or instances > 0)
+    draw = action(5, 2 | (0x020000 if instanced else 0))
     draw.name = "Draw(0, 0)" if expected else "Draw(999, 999)"
     draw.numIndices, draw.numInstances = indices, instances
     rows, unused = collect([draw])

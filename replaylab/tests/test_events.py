@@ -153,3 +153,86 @@ def test_task_event_writer_prunes_only_stale_safe_task_artifacts(tmp_path) -> No
     assert not stale_report.exists()
     assert recent.exists()
     assert unrelated.exists()
+
+
+def test_stream_batches_preserve_text_and_terminal_order(tmp_path, monkeypatch):
+    monkeypatch.setattr("replaylab_agent.events._DELTA_FLUSH_SECONDS", 60)
+    writer = TaskEventWriter(tmp_path, "batch")
+    for char in "完整的中文流式内容🧠" * 100:
+        writer.emit_delta("message-delta", text=char, data={"stream": "provider", "reset": False})
+    terminal = writer.emit("completed", delivery_id="batch-final")
+    rows = _payloads(writer)
+    assert len(rows) == 2
+    assert rows[0]["text"] == "完整的中文流式内容🧠" * 100
+    assert rows[-1]["sequence"] == terminal.sequence == 2
+    assert rows[-1]["deliveryId"] == "batch-final"
+
+
+def test_stream_boundaries_reset_and_items_are_never_merged(tmp_path, monkeypatch):
+    monkeypatch.setattr("replaylab_agent.events._DELTA_FLUSH_SECONDS", 60)
+    writer = TaskEventWriter(tmp_path, "boundaries")
+    for item, text in [("one", "A"), ("one", "B"), ("two", "C")]:
+        writer.emit_delta("agent-message-delta", text=text, data={"itemId": item})
+    writer.emit_delta("agent-message-delta", text="D", data={"itemId": "two", "reset": True})
+    writer.emit("tool-started", tool="inspect_shader")
+    writer.emit_delta("reasoning-delta", text="E", data={"channel": "summary"})
+    writer.emit_delta("reasoning-delta", text="F", data={"channel": "raw"})
+    writer.flush()
+    rows = _payloads(writer)
+    assert [r["text"] for r in rows] == ["AB", "C", "D", "", "E", "F"]
+    assert [r["sequence"] for r in rows] == list(range(1, 7))
+    assert rows[2]["data"]["reset"] is True
+
+
+def test_stream_timer_flushes_without_followup_and_owns_metadata(tmp_path, monkeypatch):
+    import threading
+    writer = TaskEventWriter(tmp_path, "latency")
+    ready = threading.Event()
+    original = writer.emit
+    def emit(*args, **kwargs):
+        event = original(*args, **kwargs)
+        ready.set()
+        return event
+    monkeypatch.setattr(writer, "emit", emit)
+    data = {"itemId": "first", "password": "never-save", "nested": [1]}
+    writer.emit_delta("message-delta", text="last token", data=data)
+    data["itemId"] = "mutated"
+    data["nested"].append(2)
+    assert ready.wait(3)
+    row = _payloads(writer)[0]
+    assert row["data"] == {"itemId": "first", "password": "[REDACTED]", "nested": [1]}
+    assert row["text"] == "last token"
+
+
+def test_stream_batch_failure_is_retained_for_synchronous_retry(tmp_path, monkeypatch):
+    monkeypatch.setattr("replaylab_agent.events._DELTA_FLUSH_SECONDS", 60)
+    writer = TaskEventWriter(tmp_path, "retry")
+    writer.emit_delta("message-delta", text="keep me")
+    original = writer.emit
+    def fail(*args, **kwargs):
+        raise OSError("disk unavailable")
+    monkeypatch.setattr(writer, "emit", fail)
+    with pytest.raises(OSError):
+        writer.flush()
+    monkeypatch.setattr(writer, "emit", original)
+    writer.emit("completed")
+    assert [r["text"] for r in _payloads(writer)] == ["keep me", ""]
+
+
+def test_stream_append_resumes_old_v1_file_and_concurrent_writer(tmp_path, monkeypatch):
+    monkeypatch.setattr("replaylab_agent.events._DELTA_FLUSH_SECONDS", 60)
+    writer = TaskEventWriter(tmp_path, "old-log")
+    writer.emit("queued")
+    writer.emit_delta("message-delta", text="buffered")
+    other = TaskEventWriter(tmp_path, "old-log")
+    other.emit("tool-completed")
+    writer.emit("completed")
+    assert [r["sequence"] for r in _payloads(writer)] == [1, 2, 3, 4]
+    assert _payloads(writer)[2]["text"] == "buffered"
+
+
+def test_queued_event_links_turns_to_their_conversation(tmp_path):
+    writer = TaskEventWriter(tmp_path, "turn")
+    ProgressReporter(writer, profile_id="test", backend="model").queued(
+        prompt_chars=1, preset="test", profile_title="test", model="test", conversation_id="chat")
+    assert _payloads(writer)[0]["data"]["conversationId"] == "chat"

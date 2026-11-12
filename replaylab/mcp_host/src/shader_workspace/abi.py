@@ -243,8 +243,9 @@ class SignatureParameter:
     def physical_dict(self) -> dict[str, Any]:
         """Return only the caller-visible signature contract.
 
-        ``channelUsedMask`` is compiler analysis describing which declared
-        lanes this particular program happens to consume.  It is not an input
+        ``channelUsedMask`` is backend-specific compiler analysis. In DXBC
+        output signatures it marks lanes *never written*, while input
+        signatures mark lanes always read. It is not an input
         or output linkage declaration, and packed DXIL elements may report the
         same aggregate usage on every row while a recompile reports usage per
         row.  Keep it in ``to_dict()`` for raw audit/reparse, but never bind an
@@ -463,7 +464,7 @@ class AbiComparison:
         }
 
 
-def _parse_signature(value: Any, path: str) -> SignatureParameter:
+def _parse_signature(value: Any, path: str, *, output: bool = False) -> SignatureParameter:
     item = _mapping(value, path)
     semantic = _alias(item, path, ("semanticName", "semantic"), _text).lower()
     semantic_index_name = _alias(
@@ -501,7 +502,11 @@ def _parse_signature(value: Any, path: str) -> SignatureParameter:
         ("channelUsedMask", "usedMask"),
         lambda raw, raw_path: _integer(raw, raw_path, maximum=0xF),
     )
-    if used_mask & ~register_mask:
+    # RenderDoc preserves DXBC's raw ReadWriteMask. For outputs its polarity
+    # is inverted: a declared xy output may validly have a zw (0xC) mask.
+    # Retain those original bits for old-record round trips, rather than
+    # guessing a conversion or weakening the physical register-mask gate.
+    if not output and used_mask & ~register_mask:
         raise AbiValidationError("%s used mask is outside its register mask" % path)
     if component_count and register_mask.bit_count() != component_count:
         raise AbiValidationError(
@@ -1149,7 +1154,8 @@ def parse_shader_abi(
         parsed = tuple(
             sorted(
                 (
-                    _parse_signature(item, "%s[%d]" % (path, index))
+                    _parse_signature(item, "%s[%d]" % (path, index),
+                                     output=path == "outputSignature")
                     for index, item in enumerate(values)
                 ),
                 key=lambda item: _canonical_json(item.physical_dict()),
