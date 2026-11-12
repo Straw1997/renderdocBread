@@ -32,6 +32,7 @@ def navigator():
         }, _pending_open={},
         _open_workspace=lambda identity, **options: calls.append((identity, options)) or True,
         _definition_requested=lambda *args: calls.append(("include", args)),
+        _select_source_link=lambda *args: calls.append(("selection", args)),
         show=lambda: calls.append(("show",)),
     )
     return lambda request: scope["navigate_source_link"](panel, request), panel, calls
@@ -40,7 +41,8 @@ def navigator():
 def test_exact_workspace_goes_to_requested_location_not_same_named_other_shader():
     navigate, panel, calls = navigator()
     assert navigate({"workspaceId": "a", "file": "source/shader.hlsl", "line": 125, "column": 4})
-    assert calls == [("a", {"quiet": True, "select": True, "navigation": (125, 4)}), ("show",)]
+    assert calls == [("a", {"quiet": True, "select": True, "navigation": (125, 4)}),
+                     ("show",), ("selection", ("a", {"workspaceId": "a", "file": "source/shader.hlsl", "line": 125, "column": 4}, 125, 4))]
     assert len(panel._workspaces) == 2
 
 
@@ -94,7 +96,7 @@ def test_uncached_source_queues_exact_location_until_background_snapshot_is_read
     panel._open_workspace = pending
     assert navigate({"workspaceId": "a", "line": 62, "column": 2})
     assert panel._pending_open["a"]["navigation"] == (62, 2)
-    assert calls == [("show",)]
+    assert calls == [("show",), ("selection", ("a", {"workspaceId": "a", "line": 62, "column": 2}, 62, 2))]
 
 
 def test_uncached_include_queues_owner_and_exact_definition_until_source_is_ready():

@@ -91,8 +91,8 @@ def test_concurrently_replaced_gate_is_not_detached(imported):
     from src.shader_workspace import io
     original = io.atomic_write_bytes
     updated = {**gate, "baselineSourceSha256": status["source"]["currentSha256"]}
-    def concurrent(path, payload):
-        original(path, payload)
+    def concurrent(path, payload, **options):
+        original(path, payload, **options)
         gate_path.write_text(json.dumps(updated))
     with mock.patch.object(io, "atomic_write_bytes", side_effect=concurrent):
         assert project_source.archive_superseded_project_source_gate(root) is None
@@ -202,8 +202,8 @@ def test_new_proposal_written_during_retirement_keeps_its_gate(restored_manual_e
     original = io.atomic_write_bytes
     before = gate_path.read_bytes()
     newer = proposal_path.read_bytes() + b"// concurrent new work\n"
-    def concurrent(path, payload):
-        original(path, payload)
+    def concurrent(path, payload, **options):
+        original(path, payload, **options)
         proposal_path.write_bytes(newer)
     with mock.patch.object(io, "atomic_write_bytes", side_effect=concurrent):
         assert project_source.archive_superseded_project_source_gate(

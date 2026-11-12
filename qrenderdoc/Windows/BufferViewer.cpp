@@ -10752,7 +10752,12 @@ bool BufferViewer::isMeshDraw()
 
 void BufferViewer::Reset()
 {
-  m_Output = NULL;
+  // Mesh preview work reads this pointer on the replay thread. Drain earlier
+  // previews and detach it on that same queue before closing/switching capture.
+  if(m_Output && m_Ctx.IsCaptureLoaded())
+    m_Ctx.Replay().BlockInvoke([this](IReplayController *) { m_Output = NULL; });
+  else
+    m_Output = NULL;
   m_MeshCameraInitialised = false;
 
   configureDrawRange();

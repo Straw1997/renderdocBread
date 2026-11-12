@@ -43,6 +43,7 @@
 #include <QSet>
 #include <QTimer>
 #include <memory>
+#include "Code/BreadVersion.h"
 #include "Code/Resources.h"
 #include "Code/ReplayLab/ReplayLabIntegration.h"
 #include "Code/CodeEditorService.h"
@@ -180,7 +181,7 @@ CaptureContext::CaptureContext(PersistentConfig &cfg) : m_Config(cfg)
 
   m_QtHelper = new MiniQtHelper(*this);
 
-  qApp->setApplicationVersion(QString::fromLatin1(RENDERDOC_GetVersionString()));
+  qApp->setApplicationVersion(QString::fromLatin1(BREAD_FULL_VERSION_STRING));
 
   PythonContext::setCtxGlobal(*this);
 
