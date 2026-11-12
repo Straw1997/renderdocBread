@@ -84,8 +84,14 @@ def test_generated_native_header_and_real_gui_resource_report_same_release(tmp_p
     from setuptools._distutils.ccompiler import new_compiler
     identity = version.release_identity()
     source = tmp_path / "probe.cpp"
-    source.write_text('#include <stdio.h>\n#include "BreadVersion.h"\n'
-                      'int main(){puts("RenderDocBread " BREAD_FULL_VERSION_STRING);}\n', encoding="ascii")
+    native = (version.REPO / "qrenderdoc/Code/qrenderdoc.cpp").read_text(encoding="utf-8")
+    printer = 'static int PrintBreadVersion()' + native.split(
+        'static int PrintBreadVersion()', 1)[1].split('\nint main(', 1)[0]
+    source.write_text('#define RENDERDOC_PLATFORM_WIN32 1\n#include <windows.h>\n'
+                      '#include <stdio.h>\n#include <string>\n#include "BreadVersion.h"\n'
+                      'static const char *RENDERDOC_GetCommitHash(){return "fixture";}\n' + printer +
+                      'int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR,int){return PrintBreadVersion();}\n',
+                      encoding="ascii")
     compiler = new_compiler(compiler="msvc")
     compiler.initialize()
     with monkeypatch.context() as context:
@@ -96,7 +102,8 @@ def test_generated_native_header_and_real_gui_resource_report_same_release(tmp_p
                         "/I" + str(version.REPO / "renderdoc/api/replay"),
                         "/I" + str(version.REPO / "qrenderdoc/Resources"),
                         "/fo" + str(tmp_path / "gui.res"), str(version.REPO / "qrenderdoc/Resources/qrenderdoc.rc")])
-        compiler.link_executable([*objects, str(tmp_path / "gui.res")], str(tmp_path / "probe"))
+        compiler.link_executable([*objects, str(tmp_path / "gui.res")], str(tmp_path / "probe"),
+                                 extra_postargs=["/SUBSYSTEM:WINDOWS"])
     exe = tmp_path / "probe.exe"
     result = subprocess.run([str(exe)], capture_output=True, text=True, check=True,
                             creationflags=subprocess.CREATE_NO_WINDOW)
@@ -114,3 +121,22 @@ def test_generated_native_header_and_real_gui_resource_report_same_release(tmp_p
     assert ctypes.wstring_at(value) == identity["displayVersion"]
     assert dll.VerQueryValueW(buffer, "\\StringFileInfo\\080904b0\\FileVersion", ctypes.byref(value), ctypes.byref(length))
     assert ctypes.wstring_at(value) == identity["version"] + ".0"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX native stdout; GUI subsystem is checked on Windows")
+def test_posix_native_version_printer_uses_the_release_identity(tmp_path):
+    compiler = shutil.which("c++")
+    if compiler is None:
+        pytest.skip("Native C++ compiler is unavailable")
+    native = (version.REPO / "qrenderdoc/Code/qrenderdoc.cpp").read_text(encoding="utf-8")
+    printer = 'static int PrintBreadVersion()' + native.split(
+        'static int PrintBreadVersion()', 1)[1].split('\nint main(', 1)[0]
+    source = tmp_path / "version.cpp"
+    source.write_text('#include <stdio.h>\n#include <string>\n#include "BreadVersion.h"\n'
+                      'static const char *RENDERDOC_GetCommitHash(){return "fixture";}\n' + printer +
+                      'int main(){return PrintBreadVersion();}\n', encoding="ascii")
+    executable = tmp_path / "version"
+    subprocess.run([compiler, str(source), "-I", str(version.REPO / "qrenderdoc/Code"),
+                    "-o", str(executable)], check=True, capture_output=True, text=True)
+    result = subprocess.run([str(executable)], check=True, capture_output=True, text=True)
+    version.validate_gui_output(result, version.release_identity()["version"])

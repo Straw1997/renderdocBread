@@ -25,7 +25,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install test dependencies
-        run: python -m pip install -e "./replaylab[test]" -e ./replaylab/mcp_host
+        run: python -m pip install -e "./replaylab[test]" -e ./replaylab/mcp_host "setuptools==84.0.0"
       - name: Test replay evidence and ABI on D3D11, D3D12, Vulkan and OpenGL
         working-directory: replaylab/mcp_host
         run: >-
@@ -48,6 +48,8 @@ jobs:
           --junitxml=${{ runner.temp }}/ai-matrix.xml
       - name: Check release identity
         run: python replaylab/packaging/version_policy.py --check
+      - name: Test native version output
+        run: python -m pytest -p no:cacheprovider replaylab/packaging/tests/test_version_policy.py
       - name: Keep matrix results
         if: always()
         uses: actions/upload-artifact@v4
