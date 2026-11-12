@@ -13,17 +13,17 @@ import pytest
 from replaylab_agent.agent_context import ProviderContext, harden_codex_argv
 from replaylab_agent.agent_report import TaskReportStore
 from replaylab_agent.connectors.codex_app_server import CodexAppServerConnector
-from replaylab_agent.errors import ConnectorError
 from replaylab_agent.native_mcp import build_native_mcp_route, native_codex_argv
 from replaylab_agent.profiles import Profile
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("include_default,with_bread", [(False, False), (True, False), (True, True)],
-                         ids=["missing-default", "no-mcp", "bread-mcp"])
+@pytest.mark.parametrize("include_default,with_bread,writable",
+                         [(False, False, True), (True, False, True), (True, True, True), (True, False, False)],
+                         ids=["missing-thread-default", "no-mcp", "bread-mcp", "read-only"])
 @pytest.mark.skipif(os.environ.get("REPLAYLAB_TEST_REAL_CODEX") != "1" or not shutil.which("codex"),
                     reason="opt-in installed Codex lifecycle check; no remote model calls")
-async def test_real_codex_named_permissions_survive_mcp_reload_and_followup(tmp_path: Path, include_default: bool, with_bread: bool):
+async def test_real_codex_named_permissions_survive_mcp_reload_and_followup(tmp_path: Path, include_default: bool, with_bread: bool, writable: bool):
     requests = []
     seen_tools, tool_outputs, tool_result_text = [], [], []
 
@@ -117,7 +117,7 @@ async def test_real_codex_named_permissions_survive_mcp_reload_and_followup(tmp_
     ]
     index = argv.index("app-server")
     argv[index:index] = [value for setting in settings for value in ("-c", setting)]
-    connector = CodexAppServerConnector(argv, cwd=owned, workspace_write=True, timeout=20,
+    connector = CodexAppServerConnector(argv, cwd=owned, workspace_write=writable, timeout=20,
         expected_mcp_servers=frozenset({"Bread"}) if with_bread else frozenset(),
         env={**os.environ, "CODEX_HOME": str(profile), "BREAD_LOCAL_TEST_KEY": "synthetic-test-key",
              "OPENAI_API_KEY": "sk-bread-local-test-not-a-real-key", "CODEX_API_KEY": "sk-bread-local-test-not-a-real-key"})
@@ -138,15 +138,9 @@ async def test_real_codex_named_permissions_survive_mcp_reload_and_followup(tmp_
 
     connector._transport.request = observed_request
     try:
-        if not include_default:
-            # Reproduce the actual failure stage: thread/start alone succeeds,
-            # while MCP inventory reload rejects the incomplete config before
-            # any model turn. A thread-start-only smoke cannot detect this.
-            with pytest.raises(ConnectorError, match="mcpServerStatus/list.*default_permissions"):
-                await connector.run("reply to synthetic probe", model="gpt-6-sol", keep_thread=True)
-            assert calls.count("thread/start") == 1 and "turn/start" not in calls
-            assert not requests
-            return
+        # The process layer also pins the default/profile table. Config reloads
+        # and older turn/start implementations must retain that verified scope,
+        # even if the thread request supplies no default of its own.
         # Use a bundled public tool-capable descriptor with this synthetic
         # API-key provider; no subscription model catalog is loaded by the test.
         first = await connector.run("reply to synthetic probe", model="gpt-5.4", keep_thread=True,
@@ -157,7 +151,7 @@ async def test_real_codex_named_permissions_survive_mcp_reload_and_followup(tmp_
         await connector._verify_tool_isolation(second.thread_id)
         assert first.text == second.text == "local handshake complete", (first, second, requests, calls)
         assert first.thread_id == second.thread_id
-        assert connector.workspace_write and not connector.workspace_capability_note
+        assert connector.workspace_write is writable and not connector.workspace_capability_note
         assert calls.count("thread/start") == 1 and calls.count("turn/start") == 2
         assert calls.count("mcpServerStatus/list") >= 3
         assert len(requests) == (3 if with_bread else 2) and all(path == "/v1/responses" for path, _ in requests)

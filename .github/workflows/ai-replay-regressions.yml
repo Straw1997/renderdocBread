@@ -44,6 +44,7 @@ jobs:
           tests/test_native_vendor.py tests/test_acp_transport.py
           tests/test_acp_connection_boundaries.py tests/test_agent_acp_session.py
           tests/test_codex_jsonl_transport.py tests/test_task_review.py
+          tests/test_codex_inventory_compatibility.py tests/test_external_connectors_optional.py
           tests/test_task_mcp_proxy.py tests/test_conversation_cleanup.py
           --junitxml=${{ runner.temp }}/ai-matrix.xml
       - name: Check release identity

@@ -1188,6 +1188,18 @@ class CodexAppServerConnector:
         if self.workspace_write and self.readable_roots != (self.cwd,):
             raise ConfigurationError("native workspace writes may only grant the exact owned cwd")
         self.workspace_capability_note = ""
+        if self.workspace_write and not self.inherit_desktop_capabilities and "app-server" in self.command:
+            # Older app-servers reload config for turn/start without retaining
+            # thread/start's named tables. Keep the same owned profile in the
+            # process layer so every reload can resolve its verified identity.
+            index = self.command.index("app-server")
+            profile = self._workspace_permission_profile
+            overrides = (
+                f'permissions.{profile}={{filesystem={{":root"="read",":workspace_roots"="write"}},network={{enabled=false}}}}',
+                f'default_permissions="{profile}"',
+            )
+            self.command = (*self.command[:index],
+                *(value for setting in overrides for value in ("-c", setting)), *self.command[index:])
         if any(not isinstance(value, str) or not value.strip() for value in expected_mcp_servers):
             raise ConfigurationError("Codex expected MCP server names must be non-empty strings")
         self.expected_mcp_servers = frozenset(
@@ -2293,6 +2305,62 @@ class CodexAppServerConnector:
 
         return entries
 
+    @staticmethod
+    def _mcp_runtime_status(entry: Mapping[str, Any]) -> Any:
+        # Codex 0.142.1 has no runtimeStatus field. Its initialized server
+        # metadata plus a nonempty tool inventory prove readiness. Never
+        # override an explicit status (including null or a terminal failure).
+        if "runtimeStatus" not in entry:
+            info = entry.get("serverInfo")
+            tools = entry.get("tools")
+            if (isinstance(info, dict) and isinstance(info.get("name"), str)
+                    and info["name"] and isinstance(info.get("version"), str)
+                    and isinstance(tools, dict) and tools):
+                return "connected"
+        return entry.get("runtimeStatus")
+
+    async def _callable_apps(self, thread_id: str) -> list[str]:
+        params = {"threadId": thread_id, "forceRefresh": False}
+        try:
+            installed = await self._transport.request(
+                "app/installed", params, timeout=min(self.timeout, 60.0))
+        except _AppServerRequestError as exc:
+            # The older dialect uses app/list and accessible/enabled flags.
+            # Fall back only for an unsupported method, never a failed query.
+            if not (exc.code == -32601 or (exc.code == -32600
+                    and "unknown variant `app/installed`" in exc.server_message)):
+                raise
+        else:
+            apps = installed.get("apps")
+            if not isinstance(apps, list):
+                raise ConnectorError("Codex app inventory returned an invalid apps array")
+            return sorted(str(item.get("id", "")) for item in apps
+                          if isinstance(item, dict) and item.get("callable") is True)
+
+        callable_apps = []
+        seen_cursors: set[str] = set()
+        for _page in range(100):
+            result = await self._transport.request(
+                "app/list", params, timeout=min(self.timeout, 60.0))
+            apps = result.get("data")
+            if not isinstance(apps, list):
+                raise ConnectorError("Codex app inventory returned an invalid data array")
+            for item in apps:
+                if (not isinstance(item, dict) or not isinstance(item.get("id"), str)
+                        or not isinstance(item.get("isAccessible", False), bool)
+                        or not isinstance(item.get("isEnabled", True), bool)):
+                    raise ConnectorError("Codex app inventory contained an invalid entry")
+                if item.get("isAccessible", False) and item.get("isEnabled", True):
+                    callable_apps.append(item["id"])
+            cursor = result.get("nextCursor")
+            if cursor is None:
+                return sorted(set(callable_apps))
+            if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
+                raise ConnectorError("Codex app inventory returned an invalid cursor")
+            seen_cursors.add(cursor)
+            params["cursor"] = cursor
+        raise ConnectorError("Codex app inventory exceeded the pagination safety bound")
+
     async def _verify_tool_isolation(self, thread_id: str) -> None:
         """Wait for exactly the task MCP set, then reject ambient tools and Apps."""
 
@@ -2351,12 +2419,12 @@ class CodexAppServerConnector:
             if self.inherit_desktop_capabilities:
                 optional_pending = [str(entry.get("name") or name) for name, entry in entries.items()
                     if name not in self.expected_mcp_servers
-                    and entry.get("runtimeStatus") not in {"connected", "authenticationRequired", "failed", "cancelled", "disabled"}]
+                    and self._mcp_runtime_status(entry) not in {"connected", "authenticationRequired", "failed", "cancelled", "disabled"}]
                 waiting.extend(f"{name} (starting optional integration)" for name in optional_pending)
             terminal: list[str] = []
             for name in sorted(self.expected_mcp_servers & actual_servers):
                 entry = entries[name]
-                runtime_status = entry.get("runtimeStatus")
+                runtime_status = self._mcp_runtime_status(entry)
                 tools = entry.get("tools")
                 if runtime_status == "connected":
                     if not isinstance(tools, dict):
@@ -2396,7 +2464,7 @@ class CodexAppServerConnector:
             if not waiting:
                 if self.inherit_desktop_capabilities:
                     self.native_capabilities["mcpServers"] = [
-                        {"name": name, "status": entry.get("runtimeStatus"),
+                        {"name": name, "status": self._mcp_runtime_status(entry),
                          "toolCount": len(entry.get("tools") or {})
                          if isinstance(entry.get("tools"), dict) else 0}
                         for name, entry in sorted(entries.items())]
@@ -2415,19 +2483,7 @@ class CodexAppServerConnector:
                 )
             await asyncio.sleep(min(_MCP_STARTUP_POLL_SECONDS, remaining))
 
-        installed = await self._transport.request(
-            "app/installed",
-            {"threadId": thread_id, "forceRefresh": False},
-            timeout=min(self.timeout, 60.0),
-        )
-        apps = installed.get("apps")
-        if not isinstance(apps, list):
-            raise ConnectorError("Codex app inventory returned an invalid apps array")
-        callable_apps = sorted(
-            str(item.get("id", ""))
-            for item in apps
-            if isinstance(item, dict) and item.get("callable") is True
-        )
+        callable_apps = await self._callable_apps(thread_id)
         if self.inherit_desktop_capabilities:
             self.native_capabilities["callableApps"] = callable_apps
         elif callable_apps:
