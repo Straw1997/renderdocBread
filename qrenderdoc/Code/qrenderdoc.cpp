@@ -23,6 +23,11 @@
  ******************************************************************************/
 
 #include <stdio.h>
+#include <string>
+
+#if defined(RENDERDOC_PLATFORM_WIN32)
+#include <windows.h>
+#endif
 
 #include <QApplication>
 #include <QCommandLineParser>
@@ -176,6 +181,31 @@ void hideOption(QCommandLineOption &opt)
   opt.setFlags(QCommandLineOption::HiddenFromHelp);
 #else
   opt.setHidden(true);
+#endif
+}
+
+static int PrintBreadVersion()
+{
+  // i18n-ignore: machine-readable application version and build identifiers.
+  std::string output = std::string("RenderDocBread " BREAD_FULL_VERSION_STRING " (") +
+                       RENDERDOC_GetCommitHash() + ")\n";
+#if defined(DISTRIBUTION_VERSION)
+  // i18n-ignore: build distribution metadata in the version diagnostic.
+  output += std::string("Packaged for ") + DISTRIBUTION_NAME + " - " + DISTRIBUTION_CONTACT + "\n";
+#endif
+#if defined(RENDERDOC_PLATFORM_WIN32)
+  // The Windows GUI CRT may not bind stdout even when the process inherits a
+  // redirected pipe. Write to that inherited handle without opening a console.
+  DWORD written = 0;
+  HANDLE handle = GetStdHandle(STD_OUTPUT_HANDLE);
+  return handle && handle != INVALID_HANDLE_VALUE &&
+                 WriteFile(handle, output.data(), DWORD(output.size()), &written, NULL) &&
+                 written == output.size()
+             ? 0
+             : 1;
+#else
+  return fwrite(output.data(), 1, output.size(), stdout) == output.size() && fflush(stdout) == 0 ? 0
+                                                                                                 : 1;
 #endif
 }
 
@@ -425,11 +455,7 @@ int main(int argc, char *argv[])
 
   if(parser.isSet(versionOption))
   {
-    printf("RenderDocBread v%s (%s)\n", MAJOR_MINOR_VERSION_STRING, RENDERDOC_GetCommitHash());
-#if defined(DISTRIBUTION_VERSION)
-    printf("Packaged for %s - %s\n", DISTRIBUTION_NAME, DISTRIBUTION_CONTACT);
-#endif
-    return 0;
+    return PrintBreadVersion();
   }
 
   if(parser.isSet(installLayer))
