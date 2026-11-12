@@ -13836,6 +13836,7 @@ void AIAssistant::discardChatContextFreeze(PendingChat &request)
 {
   request.contextFreezeJobId.clear();
   request.contextSnapshot.clear();
+  request.launchBridgeReadinessDeadlineMs = 0;
 }
 
 void AIAssistant::discardAllChatContextFreezes()
@@ -14076,6 +14077,36 @@ void AIAssistant::startNextChat()
       busyConversations.insert(request.conversationId);
       ++index;
       continue;
+    }
+    // A frozen request can wait behind another turn long enough for the bridge
+    // heartbeat to go stale. Keep its original session/EIDs and queue position
+    // while discovery recovers, just as the context-freeze path already does.
+    // Other conversations remain runnable. A changed binding or expired wait
+    // still reaches launchChat's exact identity check and fails closed.
+    if(!request.contextSnapshot.isEmpty() && m_Ctx.IsCaptureLoaded())
+    {
+      QString instance, session;
+      if(!findBridgeBinding(&instance, &session))
+      {
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        qint64 &deadline = m_ChatQueue[index].launchBridgeReadinessDeadlineMs;
+        if(deadline == 0)
+          deadline = now + ChatBridgeReadinessTimeoutMs;
+        if(now < deadline)
+        {
+          busyConversations.insert(request.conversationId);
+          if(!m_ChatLaunchRetryScheduled)
+          {
+            m_ChatLaunchRetryScheduled = true;
+            QTimer::singleShot(ChatBridgeReadinessPollIntervalMs, this, [this]() {
+              m_ChatLaunchRetryScheduled = false;
+              startNextChat();
+            });
+          }
+          ++index;
+          continue;
+        }
+      }
     }
     m_ChatQueue.remove(index);
     // The accepted queue snapshot was captured at submit time. Coalesce its transition into a

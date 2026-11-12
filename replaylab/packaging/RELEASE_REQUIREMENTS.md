@@ -57,7 +57,20 @@ Development 应用均不构成打包或发布授权。
 
 ## 3. 源码、版本和二进制一致
 
-- 交付须包含本次修复。需要更新版本时，同步 `replaylab/pyproject.toml`、
+- 版本采用 `<RenderDoc major>.<RenderDoc minor>.<Bread 扩展修订号>`，例如
+  `v1.46.137`。前两段只读取实际已集成源码的 `renderdoc/api/replay/version.h`，
+  不依据网上最新 Release、下载文件名或部分功能的 cherry-pick 提前提高版本。
+  核心自己的版本/ABI 检查保持上游 major/minor，不用 Bread 修订号替换它。
+- `RenderDocBread.package.json` 的 `versioning` 是规则和扩展修订号的唯一配置入口。
+  `extensionRevision` 显式递增，升级上游时不重置；重复构建不会自行消耗版本号。
+  Windows 版本资源要求各段不超过 65535。发布过的标签和包不能移动或覆盖。
+- 修改修订号或集成上游后运行 `python replaylab/packaging/version_policy.py --write`，
+  自动同步 `qrenderdoc/Code/BreadVersion.h` 和四处 Python 版本声明。打包入口在恢复依赖
+  和编译前执行 `--check`，遇到旧生成文件先停止，不从旧 EXE 猜版本或修改运行程序。
+  窗口标题、关于窗口、`--version`、EXE 文件/产品版本读取同一个生成头；
+  完整和增量组包校验实际 GUI、冻结 Host 与配置版本一致，并写入包内 `versioning`
+  元数据。缺少 GUI 完整三段版本或版本不同均阻止交付。
+- 交付须包含本次修复。版本生成器同步 `replaylab/pyproject.toml`、
   `replaylab/mcp_host/pyproject.toml`、`replaylab/src/replaylab_agent/__init__.py`
   和 `replaylab/mcp_host/src/version.py`，并核对冻结 Host 和发布清单中的实际版本。
 - Native 修改需构建相关驱动/依赖，并重新链接受影响的 `renderdoc.dll`、
@@ -162,7 +175,7 @@ Native/绑定构建、冻结 Host、UEX 自包含发布及最终组包。
 版本格式、标签和附件命名、安装包配置，以及发布渠道和哈希要求。
 标准打包入口使用该配置，从实际冻结 Host 版本生成 ZIP 名称并校验版本格式。
 
-1. 同步本规范第 3 节中的四处版本号。从已合并到配置指定分支的干净提交构建完整
+1. 按本规范第 3 节修改 `extensionRevision` 并生成、核对版本文件。从已合并到配置指定分支的干净提交构建完整
    Windows x64 标准包。核对冻结 Host 和包内清单版本一致，包内清单使用
    `renderdocbread-release/v1`，且 `profile` 为 `standard`。
 2. 标签为 `v<major>.<minor>.<patch>`，指向实际构建提交。上传一个

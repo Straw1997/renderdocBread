@@ -22,10 +22,23 @@ import threading
 from typing import Any, Iterator, Mapping, Sequence
 import uuid
 
-from .shader_workspace.io import atomic_write_bytes, atomic_write_json, is_within, read_json_object
+from .shader_workspace.io import (
+    atomic_write_bytes as _atomic_write_bytes,
+    atomic_write_json as _atomic_write_json,
+    is_within, read_json_object,
+)
 from .shader_workspace.explanations import source_binding_metadata
 from .shader_source_publication import SOURCE_ONLY_PUBLICATION
 from .symbols.matcher import ALIAS_SCHEMA, ALIAS_VERSION, _normalise_catalog
+
+
+def atomic_write_bytes(path: Path, value: bytes) -> None:
+    """Project artifacts use short same-directory staging names."""
+    _atomic_write_bytes(path, value, compact_temporary=True)
+
+
+def atomic_write_json(path: Path, value: Any) -> None:
+    _atomic_write_json(path, value, compact_temporary=True)
 
 
 PROJECT_SCHEMA = "renderdoc-ultra-replay-project/v1"

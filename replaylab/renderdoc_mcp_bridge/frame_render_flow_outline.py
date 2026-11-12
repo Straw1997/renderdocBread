@@ -25,9 +25,18 @@ def action_has_work(action, kind, masks):
             return all(int(value) > 0 for value in dimensions)
     elif kind == "draw":
         count = getattr(action, "numIndices", None)
-        instances = getattr(action, "numInstances", None)
-        if count is not None and instances is not None:
-            return int(count) > 0 and int(instances) > 0
+        # D3D11 Draw/DrawIndexed leave numInstances at its native default (0).
+        # Only Instanced actions have an instance-count operand. Do not infer
+        # this from a formatted/localized API name, or turn real zero-instance
+        # instanced draws into work by clamping their count to one.
+        if count is not None:
+            if int(count) <= 0:
+                return False
+            if not int(action.flags) & masks.get("instanced", 0x020000):
+                return True
+            instances = getattr(action, "numInstances", None)
+            if instances is not None:
+                return int(instances) > 0
     elif kind in ("copy", "resolve", "clear", "present"):
         return True
     return None

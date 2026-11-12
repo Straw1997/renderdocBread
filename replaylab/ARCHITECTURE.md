@@ -129,6 +129,17 @@ cannot force more model turns or change the result to failed.
 Task events are append-only `replaylab-ai-task-event/v1` JSONL under
 `%LOCALAPPDATA%\ReplayLab\ai-tasks\`. qrenderdoc displays the Agent's answer,
 clarification and tool progress; raw provider diagnostics go to local logs.
+Each user turn owns one task file; automatic continuations remain in that same
+file. These are not size-rotated conversation fragments. New queued records
+include `data.conversationId` so multiple turn files can be grouped without
+changing or moving existing conversations. Old v1 logs remain directly readable.
+Provider token deltas are coalesced only across identical contiguous metadata,
+up to 8192 characters or 100ms. Reset, item/channel/lifecycle changes, tools and
+terminal events flush the pending batch. Final deliveries retain their fsync
+and cross-process sequence/idempotency guarantees. An abrupt process kill may
+lose at most the pending 100ms of display text; terminal acknowledgement never
+precedes the flush. Readers append `text`, honor `reset` and distinguish stream,
+agent, item and reasoning channel; a JSONL row is not a sentence or model token.
 
 ## Development checks
 

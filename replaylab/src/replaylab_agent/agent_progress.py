@@ -42,7 +42,8 @@ class ProgressReporter:
         self._child_item_seq: dict[str, int] = {}
 
     # ------------------------------------------------------------- lifecycle
-    def queued(self, *, prompt_chars: int, preset: str, profile_title: str, model: str) -> None:
+    def queued(self, *, prompt_chars: int, preset: str, profile_title: str, model: str,
+               conversation_id: str = "") -> None:
         lifetime = current_run_lifetime()
         self.writer.emit(
             "queued",
@@ -55,6 +56,7 @@ class ProgressReporter:
                 "preset": preset,
                 "profileTitle": profile_title,
                 "model": model,
+                **({"conversationId": conversation_id} if conversation_id else {}),
                 "activityTitleId": "task.queued",
                 "activityTitleArgs": [],
                 **(lifetime.metadata() if lifetime is not None else {}),
@@ -149,7 +151,7 @@ class ProgressReporter:
         text = text[: _MAX_TEXT - self._main_text_chars]
         self._main_text_chars += len(text)
         for offset in range(0, len(text), _CHUNK):
-            self.writer.emit(
+            self.writer.emit_delta(
                 "message-delta",
                 profile=self.profile_id,
                 text=text[offset : offset + _CHUNK],
@@ -167,7 +169,7 @@ class ProgressReporter:
         data.setdefault("agentRole", "main")
         text = str(data.pop("text", "") or "")
         for offset in range(0, min(len(text), _MAX_TEXT), _CHUNK):
-            self.writer.emit(
+            self.writer.emit_delta(
                 "reasoning-delta",
                 profile=self.profile_id,
                 text=text[offset : offset + _CHUNK],
@@ -199,7 +201,7 @@ class ProgressReporter:
         bounded = text[:_MAX_TEXT]
         chunks = 0
         for chunks, offset in enumerate(range(0, len(bounded), _CHUNK), 1):
-            self.writer.emit(
+            self.writer.emit_delta(
                 "agent-message-delta",
                 profile=self.profile_id,
                 text=bounded[offset : offset + _CHUNK],
@@ -225,7 +227,7 @@ class ProgressReporter:
         data["planTaskId"] = child_id
         text = str(data.pop("text", "") or "")
         for offset in range(0, min(len(text), _MAX_TEXT), _CHUNK):
-            self.writer.emit(
+            self.writer.emit_delta(
                 "reasoning-delta",
                 profile=self.profile_id,
                 text=text[offset : offset + _CHUNK],

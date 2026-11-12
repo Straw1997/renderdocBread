@@ -26,7 +26,13 @@ def outputs(bridge, ctrl, event_id, output_limit, total_limit):
         pending.extend(item.children)
     if action is None:
         raise ValueError("vertex output action is unavailable")
-    instances = max(1, int(action.numInstances))
+    # Ordinary D3D11 draws leave numInstances at zero. Real instanced draws
+    # (including indirect ones) must keep a zero count instead of inventing
+    # an instance for the numerical comparison.
+    flags = int(action.flags)
+    instances = int(action.numInstances) if flags & (0x020000 | 0x080000) else 1
+    if instances <= 0:
+        raise ValueError("vertex output action has zero or unresolved instance count")
     views = max(1, int(pipeline.MultiviewBroadcastCount()))
     if instances * views > 1024:
         raise ValueError("vertex instance/view range exceeds observation budget")

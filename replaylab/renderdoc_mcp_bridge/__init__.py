@@ -7803,11 +7803,15 @@ def _frame_flow_descriptor_fields(fact, value):
 
 
 def _action_workload(action):
+    flags = _safe_int(getattr(action, "flags", 0), 0)
     result = {
         "indexCount": _safe_int(getattr(action, "numIndices", 0), 0),
         "vertexCount": _safe_int(
             getattr(action, "numVertices", getattr(action, "numIndices", 0)), 0),
-        "instanceCount": _safe_int(getattr(action, "numInstances", 0), 0),
+        "instanceCount": (
+            _safe_int(getattr(action, "numInstances", 0), 0)
+            if flags & _action_flags_mask(("Instanced", "Indirect"), 0x0A0000)
+            else 1),
     }
     for attribute, field in (
             ("indexOffset", "indexOffset"),
@@ -7842,7 +7846,6 @@ def _action_workload(action):
     dispatch_base = _dimension_triplet(getattr(action, "dispatchBase", None))
     result["dispatchBase"] = (
         list(dispatch_base) if dispatch_base is not None else None)
-    flags = _safe_int(getattr(action, "flags", 0), 0)
     if flags & _action_flags_mask(("Indirect",), 0x080000):
         result["indirectArgumentsResolved"] = False
     return result
@@ -19495,7 +19498,7 @@ def _get_post_vs_data(params):
             action = _find_action_by_event(ctrl.GetRootActions(), event_id)
             if action is None or not int(action.flags) & (0x0002 | 0x0008):
                 raise ValueError("The event is not a captured geometry draw")
-            instances = int(action.numInstances)
+            instances = _action_workload(action)["instanceCount"]
             if int(action.flags) & 0x0002 and (instances <= 0 or instance >= instances):
                 raise ValueError("The requested draw instance is unavailable or unresolved")
             if int(action.flags) & 0x0008 and instance:

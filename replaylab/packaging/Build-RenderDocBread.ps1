@@ -19,6 +19,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $config = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'RenderDocBread.package.json') -Raw | ConvertFrom-Json
+# Reject stale generated versions before dependency restoration or any build.
+if (-not $PythonExecutable) { $PythonExecutable = (Get-Command python.exe -ErrorAction Stop).Source }
+& $PythonExecutable (Join-Path $PSScriptRoot 'version_policy.py') --check
+if ($LASTEXITCODE -ne 0) { throw 'Synchronize the Bread release identity with version_policy.py --write before building.' }
 if (-not $Destination) { $Destination = Join-Path $repoRoot $config.destination }
 if (-not $BuildInputRoot) { $BuildInputRoot = Join-Path $repoRoot 'replaylab\output\build-inputs' }
 # Fail before the expensive native build if the sealed offline UEX apphost cannot be restored.

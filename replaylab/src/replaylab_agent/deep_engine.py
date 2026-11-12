@@ -593,6 +593,7 @@ class DeepAgentsEngine:
             preset=profile.preset,
             profile_title=profile.title or profile.preset,
             model=request.model or profile.model,
+            conversation_id=request.conversation_id or parse_conversation_prompt(request.prompt).conversation_id,
         )
         from .user_control import requests_pause, pause_reply
         if requests_pause(request.prompt):

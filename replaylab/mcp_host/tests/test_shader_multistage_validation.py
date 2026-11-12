@@ -94,13 +94,40 @@ def test_vertex_readback_ignores_padding_and_preserves_integer_channels():
         numIndices=2, topology="TriangleList")
     raw = struct.pack("<3fI3fI", 1, 2, 3, 0xffffffff, 4, 5, 6, 5)
     ctrl = NS(GetPipelineState=lambda: pipeline,
-        GetRootActions=lambda: [NS(eventId=50, numInstances=1, children=[])],
+        GetRootActions=lambda: [NS(eventId=50, flags=2, numInstances=1, children=[])],
         GetPostVSData=lambda *args: mesh, GetBufferData=lambda *args: raw)
     bridge = NS(rd=NS(ShaderStage=NS(Vertex="vertex"), MeshDataStage=NS(VSOut="vs")), _resource_id_int=int)
     outputs = module.outputs(bridge, ctrl, 50, 1024, 1024)
     assert outputs[0][1] == packed("f", 1, 2, 3, 4, 5, 6)
     assert outputs[1][0]["componentType"] == "UInt"
     assert outputs[1][1] == packed("I", 0xffffffff, 5)
+
+
+@pytest.mark.parametrize("flags,instances,expected", [
+    (2, 0, 1), (2 | 0x020000, 0, 0), (2 | 0x020000, 2, 2),
+    (2 | 0x080000, 0, 0), (2 | 0x020000 | 0x080000, 2, 2),
+])
+def test_vertex_numeric_readback_never_invents_instanced_work(flags, instances, expected):
+    module = load_vertex()
+    calls = []
+    signature = [NS(stream=0, systemValue="Position", varType="Float", compCount=4)]
+    pipeline = NS(GetShaderReflection=lambda _: NS(outputSignature=signature), MultiviewBroadcastCount=lambda: 1,
+        HasAlignedPostVSData=lambda _: True, IsRestartEnabled=lambda: False)
+    mesh = NS(vertexResourceId=100, indexResourceId=0, vertexByteOffset=0, vertexByteStride=16,
+        numIndices=1, topology="TriangleList")
+    def post_vs(instance, view, stage):
+        calls.append(instance)
+        return mesh
+    ctrl = NS(GetPipelineState=lambda: pipeline,
+        GetRootActions=lambda: [NS(eventId=50, flags=flags, numInstances=instances, children=[])],
+        GetPostVSData=post_vs, GetBufferData=lambda *args: packed("f", 1, 2, 3, 1))
+    bridge = NS(rd=NS(ShaderStage=NS(Vertex="vertex"), MeshDataStage=NS(VSOut="vs")), _resource_id_int=int)
+    if expected:
+        assert len(module.outputs(bridge, ctrl, 50, 1024, 1024)) == expected
+    else:
+        with pytest.raises(ValueError, match="zero or unresolved"):
+            module.outputs(bridge, ctrl, 50, 1024, 1024)
+    assert calls == list(range(expected))
 
 
 def test_vertex_value_difference_cannot_hide_behind_identical_render_targets(monkeypatch):

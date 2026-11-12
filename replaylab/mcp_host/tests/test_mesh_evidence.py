@@ -193,10 +193,27 @@ def test_legacy_current_eid_and_selected_instance_are_explicit(integrated):
     bridge, ctrl = integrated
     ctrl.action.eventId = 7
     ctrl.action.numInstances = 4
+    ctrl.action.flags |= 0x020000  # Native Instanced flag for the four-instance draw.
     result = bridge._get_post_vs_data({"instance": 2, "stage": "gs-out"})
     assert ctrl.post_calls == [(7, 2, 0, "gs")]
     assert result["complete"] and not result["allInstances"]
     assert "selected-instance-only" in result["limitations"]
+
+
+@pytest.mark.parametrize("instanced", [False, True])
+def test_zero_default_instances_only_blocks_actual_instanced_mesh_observations(integrated, instanced):
+    bridge, ctrl = integrated
+    ctrl.action.flags = 2 | (0x020000 if instanced else 0)
+    ctrl.action.numInstances = 0
+    if instanced:
+        with pytest.raises(ValueError, match="instance is unavailable"):
+            bridge._get_post_vs_data({"event_id": 30})
+        assert not ctrl.post_calls
+    else:
+        result = bridge._get_post_vs_data({"event_id": 30})
+        assert ctrl.post_calls == [(30, 0, 0, "vs")]
+        assert result["instanceCount"] == 1 and result["allInstances"]
+    assert ctrl.event == 7
 
 
 def test_mesh_image_is_managed_readable_and_sent_as_image_content(tmp_path, monkeypatch):

@@ -542,6 +542,8 @@ if ([string]::IsNullOrWhiteSpace($PythonExecutable)) {
     $PythonExecutable = Join-Path $replayLabRoot ".venv\Scripts\python.exe"
 }
 $PythonExecutable = Resolve-PythonExecutable $PythonExecutable
+& $PythonExecutable (Join-Path $PSScriptRoot 'version_policy.py') --check
+if ($LASTEXITCODE -ne 0) { throw 'Bread release metadata is stale; run version_policy.py --write.' }
 $probe = Get-BuildProbe $PythonExecutable $agentSource $mcpRoot
 Assert-BuildProbe $probe $replayLabRoot $mcpRoot
 $sourceInputsSha256 = & $PythonExecutable (Join-Path $packagingRoot "runtime_inputs.py")

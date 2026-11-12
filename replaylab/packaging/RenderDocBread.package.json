@@ -5,6 +5,13 @@
   "applicationDirectory": "x64/Development",
   "destination": "dist",
   "standardCapabilitiesInput": "capabilities",
+  "versioning": {
+    "scheme": "renderdoc-extension/v1",
+    "upstreamHeader": "renderdoc/api/replay/version.h",
+    "extensionRevision": 137,
+    "revisionPolicy": "monotonic",
+    "displayPrefix": "v"
+  },
   "autoUpdate": {
     "repository": "Straw1997/renderdocBread",
     "baseBranch": "v1.x",

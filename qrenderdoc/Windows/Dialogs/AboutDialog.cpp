@@ -26,6 +26,7 @@
 #include <QApplication>
 #include <QLabel>
 #include <QString>
+#include "Code/BreadVersion.h"
 #include "Code/QRDUtils.h"
 #include "Code/pyrenderdoc/PythonContext.h"
 #include "UpdateDialog.h"
@@ -40,13 +41,14 @@ AboutDialog::AboutDialog(QWidget *parent) : QDialog(parent), ui(new Ui::AboutDia
 
   if(hash[0] == QLatin1Char('N') && hash[1] == QLatin1Char('O'))
   {
-    ui->version->setText(tr("Version %1 (built from unknown source)").arg(lit(FULL_VERSION_STRING)));
+    ui->version->setText(
+        tr("Version %1 (built from unknown source)").arg(lit(BREAD_FULL_VERSION_STRING)));
   }
   else
   {
     ui->version->setText(
         tr("Version %1 (built from <a href='%2'>%3</a>)")
-            .arg(lit(FULL_VERSION_STRING))
+            .arg(lit(BREAD_FULL_VERSION_STRING))
             .arg(BreadRelease::RepositoryPage().toString() + QFormatStr("/commit/%1").arg(hash))
             .arg(hash.left(8)));
   }

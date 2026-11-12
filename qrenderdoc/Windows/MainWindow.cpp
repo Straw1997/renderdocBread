@@ -43,6 +43,7 @@
 #include <QToolTip>
 #include <QVersionNumber>
 #include <QWindow>
+#include "Code/BreadVersion.h"
 #include "Code/CaptureContext.h"
 #include "Code/QRDUtils.h"
 #include "Code/Resources.h"
@@ -1296,7 +1297,7 @@ void MainWindow::SetTitle(const QString &filename)
   QString text = prefix + lit("RenderDocBread ");    // i18n-ignore: product brand
 
   // Build configuration/commit details remain available through diagnostics.
-  text += lit(FULL_VERSION_STRING);
+  text += lit(BREAD_FULL_VERSION_STRING);
 
   if(IsRunningAsAdmin())
     text += tr(" (Administrator)");

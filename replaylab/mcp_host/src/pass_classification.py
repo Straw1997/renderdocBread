@@ -80,6 +80,7 @@ FLAG_PASS_BOUNDARY = 0x2000
 FLAG_DISPATCH_RAY = 0x4000
 FLAG_BUILD_ACCELERATION_STRUCTURE = 0x8000
 FLAG_INDIRECT = 0x080000
+FLAG_INSTANCED = 0x020000
 
 GRAPHICS_MASK = FLAG_DRAW | FLAG_MESH_DISPATCH
 COMPUTE_MASK = FLAG_DISPATCH | FLAG_DISPATCH_RAY
@@ -1129,6 +1130,12 @@ def _compact_workload(action: Mapping[str, Any]) -> dict[str, Any]:
         _safe_int(action.get("numVertices", action.get("vertexCount")), 0),
     )
     result.setdefault("instanceCount", _safe_int(action.get("numInstances"), 0))
+    if not (_safe_int(action.get("flags"), 0) & (FLAG_INSTANCED | FLAG_INDIRECT)
+            or _has_named_flag(_flag_names(action), "Instanced") or _is_indirect(action)):
+        # A non-instanced Draw/DrawIndexed executes once even when RenderDoc's
+        # unused numInstances field is zero. Preserve zero for instanced and
+        # unresolved indirect actions; it must not be normalized away there.
+        result["instanceCount"] = 1
     if _is_indirect(action):
         result["indirectArgumentsResolved"] = False
     return result

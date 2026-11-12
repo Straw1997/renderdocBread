@@ -203,6 +203,7 @@ private:
     QString requestedCaptureSessionId;
     qint64 requestedEventId = 0;
     qint64 requestedSelectedEventId = 0;
+    qint64 launchBridgeReadinessDeadlineMs = 0;
     bool contextFreezeRequired = false;
     ClarificationResponse clarificationResponse;
     bool includeConversation = true;
@@ -491,6 +492,7 @@ private:
   QString m_ChatBridgeRetryTaskId;
   qint64 m_ChatBridgeRetryDeadlineMs = 0;
   bool m_ChatBridgeRetryScheduled = false;
+  bool m_ChatLaunchRetryScheduled = false;
   qint64 m_ChatContextFreezeEventId = 0;
   qint64 m_ChatContextFreezeSelectedEventId = 0;
   qint64 m_ChatContextFreezeDeadlineMs = 0;

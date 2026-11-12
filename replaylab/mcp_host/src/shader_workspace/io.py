@@ -165,9 +165,14 @@ def is_within(root: Path, candidate: Path) -> bool:
         return False
 
 
-def atomic_write_bytes(path: Path, value: bytes) -> None:
+def atomic_write_bytes(path: Path, value: bytes, *, compact_temporary: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.parent / (".%s.tmp-%s" % (path.name, uuid.uuid4().hex))
+    # Project artifacts can opt out of duplicating a near-limit destination
+    # name in staging (NAME_MAX / Win32 MAX_PATH). Transaction journals retain
+    # their target-bound naming contract for crash recovery. In either case
+    # staging stays beside its destination for same-filesystem atomic replace.
+    name = "project" if compact_temporary else path.name
+    temporary = path.parent / (".%s.tmp-%s" % (name, uuid.uuid4().hex))
     try:
         with temporary.open("xb") as stream:
             stream.write(value)
@@ -178,11 +183,11 @@ def atomic_write_bytes(path: Path, value: bytes) -> None:
         _cleanup_temporary_with_retry(temporary)
 
 
-def atomic_write_json(path: Path, value: Any) -> None:
+def atomic_write_json(path: Path, value: Any, *, compact_temporary: bool = False) -> None:
     payload = (
         json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     ).encode("utf-8")
-    atomic_write_bytes(path, payload)
+    atomic_write_bytes(path, payload, compact_temporary=compact_temporary)
 
 
 def apply_exact_text_edits(source: str, edits: list[dict[str, str]], *, maximum_bytes: int) -> str:
