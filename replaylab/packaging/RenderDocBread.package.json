@@ -8,7 +8,7 @@
   "versioning": {
     "scheme": "renderdoc-extension/v1",
     "upstreamHeader": "renderdoc/api/replay/version.h",
-    "extensionRevision": 137,
+    "extensionRevision": 138,
     "revisionPolicy": "monotonic",
     "displayPrefix": "v"
   },

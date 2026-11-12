@@ -213,12 +213,12 @@ def test_codex_process_hardening_keeps_read_only_workspace_tools() -> None:
         "tools.view_image=true",
         "features.hooks=false",
         "features.multi_agent=false",
-        "agents.enabled=false",
         'web_search="disabled"',
         'history.persistence="none"',
     ):
         assert override in rendered
     assert "mcp_servers.Bread" not in rendered
+    assert "agents.enabled=" not in rendered
 
 
 @pytest.mark.asyncio

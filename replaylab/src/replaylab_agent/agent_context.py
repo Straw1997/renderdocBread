@@ -184,8 +184,9 @@ _CODEX_CONFIG_OVERRIDES = (
     "features.unified_exec=true",
     "features.skill_mcp_dependency_install=false",
     "features.hooks=false",
+    # `agents.enabled` is parsed as a role table in Codex 0.142.1.
+    # Disable collaboration through its feature gate without creating a role.
     "features.multi_agent=false",
-    "agents.enabled=false",
     "features.goals=false",
     "features.memories=false",
     "project_doc_max_bytes=0",
