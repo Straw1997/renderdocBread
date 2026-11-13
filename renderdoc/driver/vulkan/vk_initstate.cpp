@@ -23,11 +23,32 @@
  ******************************************************************************/
 
 #include "core/settings.h"
+#include "replay/replay_timing.h"
 #include "strings/string_utils.h"
 #include "vk_core.h"
 #include "vk_debug.h"
 
 RDOC_EXTERN_CONFIG(bool, Vulkan_Debug_SingleSubmitFlushing);
+
+static void CountInitialImageClear(const VulkanCreationInfo::Image &image,
+                                   const VkImageSubresourceRange &range)
+{
+  if(!IsReplayTimingActive())
+    return;
+  AddReplayTimingCounter(ReplayTimingCounter::InitialClearResources);
+  const uint64_t layers = RDCMIN(range.layerCount, image.arrayLayers - range.baseArrayLayer);
+  VkFormat format = image.format;
+  if(range.aspectMask == VK_IMAGE_ASPECT_STENCIL_BIT)
+    format = VK_FORMAT_S8_UINT;
+  else if(range.aspectMask == VK_IMAGE_ASPECT_DEPTH_BIT)
+    format = GetDepthOnlyFormat(format);
+  for(uint32_t mip = range.baseMipLevel;
+      mip < image.mipLevels && mip - range.baseMipLevel < range.levelCount; ++mip)
+    AddReplayTimingCounter(
+        ReplayTimingCounter::InitialClearBytes,
+        GetByteSize(image.extent.width, image.extent.height, image.extent.depth, format, mip) *
+            layers * uint32_t(image.samples));
+}
 
 // VKTODOLOW there's a lot of duplicated code in this file for creating a buffer to do
 // a memory copy and saving to disk.
@@ -1838,11 +1859,14 @@ void WrappedVulkan::Apply_InitialState(WrappedVkRes *res, VkInitialContents &ini
     return;
 
   VkResourceType type = initial.type;
+  AddReplayTimingCounter(ReplayTimingCounter::InitialResources);
 
   ResourceId id = GetResourceManager()->GetID(res);
 
   if(type == eResDescriptorSet)
   {
+    ScopedReplayTimingSection timing(ReplayTimingSection::InitialDescriptors);
+    AddReplayTimingCounter(ReplayTimingCounter::InitialDescriptorHeaps);
     VkWriteDescriptorSet *writes = initial.descriptorWrites;
 
     // if it ended up that no descriptors were valid, just skip
@@ -1861,6 +1885,7 @@ void WrappedVulkan::Apply_InitialState(WrappedVkRes *res, VkInitialContents &ini
 
     for(uint32_t i = 0; i < initial.numDescriptors; i++)
     {
+      AddReplayTimingCounter(ReplayTimingCounter::InitialDescriptors, writes[i].descriptorCount);
       RDCASSERT(writes[i].dstBinding < bindings.size());
 
       DescriptorSetSlot *bind = bindings[writes[i].dstBinding];
@@ -1932,6 +1957,11 @@ void WrappedVulkan::Apply_InitialState(WrappedVkRes *res, VkInitialContents &ini
   }
   else if(type == eResImage)
   {
+    ScopedReplayTimingSection timing(ReplayTimingSection::InitialGPUCopy);
+    // Device-memory initial contents precede images in VulkanResourceManager's resource order.
+    // Signal that small prefix before recording independent texture restores behind it.
+    SubmitInitialRestoreHostPrefix();
+    AddReplayTimingCounter(ReplayTimingCounter::InitialTextures);
     ResourceId orig = id;
 
     bool initialized = false;
@@ -1946,6 +1976,10 @@ void WrappedVulkan::Apply_InitialState(WrappedVkRes *res, VkInitialContents &ini
     ResourceId boundMemory = state->boundMemory;
     VkDeviceSize boundMemoryOffset = state->boundMemoryOffset;
     VkDeviceSize boundMemorySize = state->boundMemorySize;
+    if(CanDeferInitialRestore() && boundMemory != ResourceId())
+      m_InitialRestoreImageHostRanges[boundMemory].update(
+          boundMemoryOffset, boundMemoryOffset + boundMemorySize, true,
+          [](bool previous, bool next) { return previous || next; });
     const ImageInfo &imageInfo = state->GetImageInfo();
     initialized = IsActiveReplaying(m_State);
 
@@ -2140,6 +2174,8 @@ void WrappedVulkan::Apply_InitialState(WrappedVkRes *res, VkInitialContents &ini
         VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0,
                                          VK_REMAINING_ARRAY_LAYERS};
 
+        CountInitialImageClear(m_CreationInfo.m_Image[id], range);
+
         ObjDisp(cmd)->CmdClearColorImage(Unwrap(cmd), ToUnwrappedHandle<VkImage>(res),
                                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearval, 1, &range);
 
@@ -2171,6 +2207,8 @@ void WrappedVulkan::Apply_InitialState(WrappedVkRes *res, VkInitialContents &ini
 
         VkClearDepthStencilValue clearval = {1.0f, 0};
         VkImageSubresourceRange range = imageInfo.FullRange();
+
+        CountInitialImageClear(m_CreationInfo.m_Image[id], range);
 
         ObjDisp(cmd)->CmdClearDepthStencilImage(Unwrap(cmd), ToUnwrappedHandle<VkImage>(res),
                                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearval, 1,
@@ -2226,8 +2264,6 @@ void WrappedVulkan::Apply_InitialState(WrappedVkRes *res, VkInitialContents &ini
       }
       return;
     }
-
-    VkBuffer buf = initial.buf;
 
     VkExtent3D extent = m_CreationInfo.m_Image[id].extent;
 
@@ -2385,12 +2421,40 @@ void WrappedVulkan::Apply_InitialState(WrappedVkRes *res, VkInitialContents &ini
       m_setupImageBarriers.Merge(setupBarriers);
 
       if(copyRegions.size() > 0)
-        ObjDisp(cmd)->CmdCopyBufferToImage(Unwrap(cmd), Unwrap(buf), ToUnwrappedHandle<VkImage>(res),
-                                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                           (uint32_t)copyRegions.size(), copyRegions.data());
+      {
+        AddReplayTimingCounter(ReplayTimingCounter::InitialGPUCopyResources);
+        uint64_t restoreBytes = 0;
+        // Payload bytes, excluding row padding; aspect formats avoid double-counting D/S planes.
+        for(const VkBufferImageCopy &region : copyRegions)
+        {
+          VkFormat sizeFormat = fmt;
+          if(region.imageSubresource.aspectMask == VK_IMAGE_ASPECT_STENCIL_BIT)
+            sizeFormat = VK_FORMAT_S8_UINT;
+          else if(region.imageSubresource.aspectMask == VK_IMAGE_ASPECT_DEPTH_BIT)
+            sizeFormat = GetDepthOnlyFormat(fmt);
+          if(planeCount == 1)
+            restoreBytes += GetByteSize(region.imageExtent.width, region.imageExtent.height,
+                                        region.imageExtent.depth, sizeFormat, 0) *
+                            region.imageSubresource.layerCount;
+        }
+        AddReplayTimingCounter(ReplayTimingCounter::InitialGPUCopyFootprintBytes, restoreBytes);
+        if(!RestoreInitialImage(id, initial, cmd, ToUnwrappedHandle<VkImage>(res), copyRegions,
+                                restoreBytes))
+        {
+          VkDeviceSize sourceOffset = 0;
+          VkBuffer source = InitialUploadSource(id, initial, cmd, restoreBytes, sourceOffset);
+          for(VkBufferImageCopy &region : copyRegions)
+            region.bufferOffset += sourceOffset;
+          ObjDisp(cmd)->CmdCopyBufferToImage(Unwrap(cmd), source, ToUnwrappedHandle<VkImage>(res),
+                                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                             (uint32_t)copyRegions.size(), copyRegions.data());
+        }
+      }
 
       if(clearRegions.size() > 0)
       {
+        for(const VkImageSubresourceRange &range : clearRegions)
+          CountInitialImageClear(m_CreationInfo.m_Image[id], range);
         if(IsDepthOrStencilFormat(fmt))
         {
           VkClearDepthStencilValue val = {0, 0};
@@ -2422,6 +2486,8 @@ void WrappedVulkan::Apply_InitialState(WrappedVkRes *res, VkInitialContents &ini
   }
   else if(type == eResDeviceMemory)
   {
+    ScopedReplayTimingSection timing(ReplayTimingSection::InitialGPUCopy);
+    AddReplayTimingCounter(ReplayTimingCounter::InitialHeaps);
     Intervals<InitReqType> resetReq;
     ResourceId orig = id;
     MemRefs *memRefs = GetResourceManager()->FindMemRefs(orig);
@@ -2476,8 +2542,11 @@ void WrappedVulkan::Apply_InitialState(WrappedVkRes *res, VkInitialContents &ini
           resetReq.update(it->start(), RDCMIN(it->finish(), dstBufSize), eInitReq_Copy,
                           [](InitReqType x, InitReqType y) -> InitReqType { return RDCMAX(x, y); });
 
+    SkipOverwrittenInitialMemory(orig, dstBufSize, resetReq);
+
     if(resetReq.size() == 1 && resetReq.begin()->value() == eInitReq_None)
     {
+      AddReplayTimingCounter(ReplayTimingCounter::InitialReadOnlySkipped);
       RDCDEBUG("Apply_InitialState (Mem %s): skipped", ToStr(orig).c_str());
       return;    // no copy or clear required
     }
@@ -2508,12 +2577,21 @@ void WrappedVulkan::Apply_InitialState(WrappedVkRes *res, VkInitialContents &ini
       switch(req)
       {
         case eInitReq_Clear:
+          if(CanDeferInitialRestore())
+            m_InitialRestoreHostRanges[orig].update(
+                start, finish, true, [](bool previous, bool next) { return previous || next; });
+          AddReplayTimingCounter(ReplayTimingCounter::InitialClearBytes, size);
           if(finish >= dstBufSize)
             size = VK_WHOLE_SIZE;
           ObjDisp(cmd)->CmdFillBuffer(Unwrap(cmd), Unwrap(dstBuf), start, size, 0);
           fillCount++;
           break;
-        case eInitReq_Copy: regions.push_back({start, start, size}); break;
+        case eInitReq_Copy:
+          if(CanDeferInitialRestore())
+            m_InitialRestoreHostRanges[orig].update(
+                start, finish, true, [](bool previous, bool next) { return previous || next; });
+          regions.push_back({start, start, size});
+          break;
         default: break;
       }
     }
@@ -2521,6 +2599,9 @@ void WrappedVulkan::Apply_InitialState(WrappedVkRes *res, VkInitialContents &ini
              regions.size());
     if(regions.size() > 0)
     {
+      AddReplayTimingCounter(ReplayTimingCounter::InitialGPUCopyResources);
+      for(const VkBufferCopy &region : regions)
+        AddReplayTimingCounter(ReplayTimingCounter::InitialGPUCopyBufferBytes, region.size);
       VkBufferMemoryBarrier bufBarrier = {
           VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
           NULL,

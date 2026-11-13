@@ -54,6 +54,16 @@ def test_debug_request_rejects_partial_multibyte_selection():
         ui.source_request(document(source), {}, {}, 4, 6, 1)
 
 
+def test_saved_source_preview_uses_physical_owner_for_compiler_contract():
+    preview_id, owner_id = 'a' * 64, 'b' * 32
+    current = document('float value = 1;')
+    current.update(workspaceId=preview_id, sourceWorkspaceId=owner_id)
+    result = ui.source_request(current, {'workspaceId': preview_id,
+        'sourceWorkspaceId': owner_id, 'workspacePath': '/managed/shader'}, {}, 6, 11, 61990)
+    assert result['workspaceId'] == preview_id  # UI completion still belongs to this tab.
+    assert result['sourceWorkspaceId'] == owner_id  # Compilation rebinds the exact physical owner.
+
+
 @pytest.mark.parametrize("workspace, events, selected, expected", [
     ({}, [11, 23], 23, 23),
     ({}, [11, 23], 4, 11),

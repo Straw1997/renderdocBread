@@ -7087,6 +7087,7 @@ void ShaderViewer::on_unrefresh_clicked()
 
 void ShaderViewer::on_refresh_clicked()
 {
+  m_Ctx.CancelReplayBackgroundWork();
   if(m_ExplanatoryMode)
   {
     // The Refresh/F5 shortcut remains registered for this window. Fail closed here as well as in

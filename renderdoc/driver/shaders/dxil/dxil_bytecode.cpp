@@ -86,14 +86,31 @@ void *BumpAllocator::alloc(size_t sz)
 
   return ret + sizeof(pattern) * 2;
 #else
-  // if the current storage can't satisfy this, retire it and make a new one
-  if(cur + sz > base + m_BlockSize)
+  // Large requests get their own storage, leaving the ordinary bump block usable.
+  if(sz > m_BlockSize)
+  {
+    byte *ret = AllocAlignedBuffer(sz);
+    storage.push_back(ret);
+    m_LargeAllocationExtra += sz - m_BlockSize;
+#if defined(RDOC_RELEASE)
+    memset(ret, 0, sz);
+#else
+    memset(ret, 0xcc, sz);
+#endif
+    return ret;
+  }
+  // Account for alignment before the capacity check. Checking the unaligned pointer can
+  // accept an allocation that overruns the end by up to 15 bytes.
+  const size_t alignedOffset = AlignUp(size_t(cur - base), size_t(16));
+  if(alignedOffset > m_BlockSize || sz > m_BlockSize - alignedOffset)
   {
     cur = base = AllocAlignedBuffer(m_BlockSize);
     storage.push_back(base);
   }
-
-  cur = AlignUpPtr(cur, 16U);
+  else
+  {
+    cur = base + alignedOffset;
+  }
   byte *ret = cur;
 #if defined(RDOC_RELEASE)
   memset(ret, 0, sz);
@@ -102,6 +119,18 @@ void *BumpAllocator::alloc(size_t sz)
 #endif
   cur += sz;
   return ret;
+#endif
+}
+
+uint64_t BumpAllocator::GetAllocatedBytes() const
+{
+#if ENABLED(BUMP_ALLOC_DEBUG)
+  uint64_t bytes = 0;
+  for(byte *block : storage)
+    bytes += *(uint32_t *)block + 3 * sizeof(pattern);
+  return bytes;
+#else
+  return uint64_t(storage.size()) * m_BlockSize + m_LargeAllocationExtra;
 #endif
 }
 
@@ -2915,3 +2944,39 @@ void LLVMOrderAccumulator::accumulate(const Metadata *m)
 }
 
 };    // namespace DXIL
+
+#if ENABLED(ENABLE_UNIT_TESTS)
+#include "3rdparty/catch/catch.hpp"
+TEST_CASE("DXIL arena keeps aligned boundary and large allocations disjoint", "[dxil][memory]")
+{
+  DXIL::BumpAllocator arena(64);
+  byte *first = (byte *)arena.alloc(1);
+  first[0] = 0x71;
+  byte *boundary = (byte *)arena.alloc(63);
+  memset(boundary, 0x2a, 63);
+  CHECK(first[0] == 0x71);
+  CHECK((uintptr_t(boundary) & 15U) == 0);
+  CHECK(arena.GetAllocatedBytes() >= 128);
+  byte *large = (byte *)arena.alloc(129);
+  memset(large, 0x35, 129);
+  for(size_t size = 1; size <= 63; size++)
+  {
+    byte *value = (byte *)arena.alloc(size);
+    REQUIRE((uintptr_t(value) & 15U) == 0);
+    memset(value, 0x19, size);
+  }
+  CHECK(first[0] == 0x71);
+  for(size_t i = 0; i < 63; i++)
+    CHECK(boundary[i] == 0x2a);
+  for(size_t i = 0; i < 129; i++)
+    CHECK(large[i] == 0x35);
+  DXIL::BumpAllocator oddBlock(63);
+  byte *odd = (byte *)oddBlock.alloc(63);
+  memset(odd, 0x57, 63);
+  byte *next = (byte *)oddBlock.alloc(1);
+  CHECK((uintptr_t(next) & 15U) == 0);
+  *next = 0x11;
+  for(size_t i = 0; i < 63; i++)
+    CHECK(odd[i] == 0x57);
+}
+#endif

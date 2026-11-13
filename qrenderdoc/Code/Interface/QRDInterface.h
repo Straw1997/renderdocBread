@@ -2809,6 +2809,11 @@ thread. A capture, event, or buffer generation change cancels an obsolete public
   virtual void RefreshReplayStatus(uint32_t expectedEventId, uint64_t expectedBufferGeneration,
                                    std::function<void(bool)> completed) = 0;
 
+  DOCUMENT(R"(Cancel queued idle replay maintenance when a new edit input arrives. Call on the
+GUI thread before submitting compilation or live parameter updates. This does not cancel or undo
+the foreground replay; its completed publication can schedule new idle work.)");
+  virtual void CancelReplayBackgroundWork() = 0;
+
   DOCUMENT(R"(Determine if a resource has been replaced. See :meth:`RegisterReplacement`.
 
 :param renderdoc.ResourceId id: The id of the resource to check.

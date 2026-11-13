@@ -152,11 +152,16 @@ public:
   void OnCaptureClosed() override;
   void OnSelectedEventChanged(uint32_t eventId) override {}
   void OnEventChanged(uint32_t eventId) override;
+  void OnReplayNavigationRequested(uint32_t selectedEventId, uint32_t eventId);
+  void CancelReplayNavigation();
 
   // Held arrow-key navigation drives a lightweight scrub; see eventFilter / events_currentChanged.
   bool eventFilter(QObject *watched, QEvent *event) override;
   QSet<int> m_ArrowScrubKeys;
   bool m_UpdatingReplaySelection = false;
+  bool m_NavigationPending = false;
+  uint32_t m_NavigationEventID = 0;
+  uint32_t m_NavigationSelectedEventID = 0;
 
   void BookmarksChanged();
   void JumpToEID(uint32_t EID);

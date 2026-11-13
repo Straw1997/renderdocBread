@@ -25,6 +25,7 @@
 #include "d3d12_resources.h"
 #include <algorithm>
 #include "driver/shaders/dxbc/dxbc_reflect.h"
+#include "driver/shaders/dxil/dxil_bytecode.h"
 #include "driver/shaders/dxil/dxil_metadata.h"
 #include "replay/replay_timing.h"
 #include "d3d12_command_list.h"
@@ -34,6 +35,41 @@
 
 GPUAddressRangeTracker WrappedID3D12Resource::m_Addresses;
 std::map<WrappedID3D12PipelineState::DXBCKey, WrappedID3D12Shader *> WrappedID3D12Shader::m_Shaders;
+
+rdcstr WrappedID3D12Shader::GetMemoryAudit()
+{
+  uint64_t bytecode = 0, containers = 0, dxil = 0, reflection = 0, sources = 0;
+  uint32_t parsed = 0, programs = 0;
+  for(const auto &entry : m_Shaders)
+  {
+    const ShaderEntry *shader = entry.second;
+    bytecode += shader->m_Bytecode.capacity();
+    if(shader->m_DXBCFile)
+    {
+      parsed++;
+      containers += shader->m_DXBCFile->GetRetainedByteStorage();
+      const DXIL::Program *program = shader->m_DXBCFile->GetDXILByteCode();
+      if(program)
+      {
+        programs++;
+        dxil += program->GetRetainedStorageBytes();
+      }
+    }
+    if(shader->m_Details)
+    {
+      reflection += shader->m_Details->rawBytes.capacity();
+      for(const ShaderSourceFile &file : shader->m_Details->debugInfo.files)
+        sources += file.contents.capacity();
+    }
+  }
+  return StringFormat::Fmt(
+      "api=D3D12ShaderMemory shaders=%zu parsed=%u dxilPrograms=%u bytecodeCapacity=%llu "
+      "containerByteCapacity=%llu dxilByteArenaDisassemblyCapacity=%llu "
+      "reflectionRawCapacity=%llu sourceTextCapacity=%llu nestedArraysExcluded=1",
+      m_Shaders.size(), parsed, programs, (unsigned long long)bytecode,
+      (unsigned long long)containers, (unsigned long long)dxil, (unsigned long long)reflection,
+      (unsigned long long)sources);
+}
 bool WrappedID3D12Shader::m_InternalResources = false;
 int32_t WrappedID3D12CommandAllocator::m_ResetEnabled = 1;
 
@@ -833,7 +869,7 @@ void WrappedID3D12DescriptorHeap::InvalidateInitialDescriptorRestore()
   // deliberately takes the complete baseline path even when no captured descriptor write ran.
   m_InitialDescriptorSource = NULL;
   m_InitialDescriptorDirty.ClearDirty();
-  SAFE_DELETE_ARRAY(cachedDescriptors);
+  cachedDescriptors.Clear();
 }
 
 bool WrappedID3D12DescriptorHeap::GetCheckpointDescriptorRanges(
@@ -1149,7 +1185,119 @@ TEST_CASE("D3D12 descriptor boundary counts remain equal to the complete saved b
   CHECK(tracker.DescriptorCount() == 0);
 }
 
+TEST_CASE("D3D12 inspector descriptor cache is sparse and bounded across scans",
+          "[d3d12][descriptor-view-cache]")
+{
+  D3D12DescriptorViewCache cache;
+  const uint32_t count = 1000003;
+  Descriptor view;
+  view.type = DescriptorType::ConstantBuffer;
+  view.resource = ResourceIDGen::GetNewUniqueID();
+  view.byteOffset = 256;
+  view.byteSize = 256;
+  CHECK(cache.Find(0) == NULL);
+  CHECK(cache.AllocatedBytes() == 0);
+  cache.Store(count - 1, count, view);
+  REQUIRE(cache.Find(count - 1) != NULL);
+  CHECK(bool(*cache.Find(count - 1) == view));
+  CHECK(cache.ResidentPages() == 1);
+  CHECK(cache.AllocatedBytes() < 128 * 1024);
+  cache.Store(count, count, view);
+  REQUIRE(cache.Find(count) !=
+          NULL);    // same allocated tail page, but the rejected store wrote nothing
+  CHECK(cache.Find(count)->type == DescriptorType::Unknown);
+  cache.Clear();
+  CHECK(cache.AllocatedBytes() == 0);
+
+  for(uint32_t i = 0; i < D3D12DescriptorViewCache::MaxPages; i++)
+  {
+    view.byteOffset = i * 256;
+    cache.Store(i * D3D12DescriptorViewCache::PageSize, count, view);
+  }
+  REQUIRE(cache.Find(0) != NULL);    // keep the oldest page hot
+  view.byteOffset = 999;
+  const uint32_t next = D3D12DescriptorViewCache::MaxPages * D3D12DescriptorViewCache::PageSize;
+  cache.Store(next, count, view);
+  CHECK(cache.Find(0) != NULL);
+  CHECK(cache.Find(D3D12DescriptorViewCache::PageSize) == NULL);
+  REQUIRE(cache.Find(next) != NULL);
+  CHECK(bool(*cache.Find(next) == view));
+  CHECK(cache.Find(next + 1)->type == DescriptorType::Unknown);
+  CHECK(cache.ResidentPages() == D3D12DescriptorViewCache::MaxPages);
+
+  for(uint32_t i = next; i < count; i += D3D12DescriptorViewCache::PageSize)
+  {
+    view.byteOffset = i;
+    cache.Store(i, count, view);
+    REQUIRE(cache.Find(i) != NULL);
+    CHECK(bool(*cache.Find(i) == view));
+    REQUIRE(cache.ResidentPages() <= D3D12DescriptorViewCache::MaxPages);
+  }
+  CHECK(cache.AllocatedBytes() < 3 * 1024 * 1024);
+  cache.Clear();
+  CHECK(cache.AllocatedBytes() == 0);
+  CHECK(cache.Find(next) == NULL);
+  view.resource = ResourceIDGen::GetNewUniqueID();
+  cache.Store(next, count, view);
+  REQUIRE(cache.Find(next) != NULL);
+  CHECK(bool(*cache.Find(next) == view));    // invalidation never resurrects the old view
+}
+
 #endif    // ENABLED(ENABLE_UNIT_TESTS)
+
+const Descriptor *D3D12DescriptorViewCache::Find(uint32_t index)
+{
+  const uint32_t pageIndex = index / PageSize;
+  if(pageIndex >= m_Pages.size() || !m_Pages[pageIndex].views)
+    return NULL;
+  Page &page = m_Pages[pageIndex];
+  page.lastUse = ++m_Clock;
+  return &page.views[index % PageSize];
+}
+
+void D3D12DescriptorViewCache::Store(uint32_t index, uint32_t descriptorCount, const Descriptor &view)
+{
+  if(index >= descriptorCount)
+    return;
+  const uint32_t pageCount = uint32_t((uint64_t(descriptorCount) + PageSize - 1) / PageSize);
+  if(m_Pages.size() < pageCount)
+    m_Pages.resize(pageCount);
+  const uint32_t pageIndex = index / PageSize;
+  Page &page = m_Pages[pageIndex];
+  if(!page.views)
+  {
+    if(m_Resident.size() >= MaxPages)
+    {
+      // Inspect only resident pages, never scan the entire captured heap on eviction.
+      size_t oldest = 0;
+      for(size_t i = 1; i < m_Resident.size(); i++)
+        if(m_Pages[m_Resident[i]].lastUse < m_Pages[m_Resident[oldest]].lastUse)
+          oldest = i;
+      Page &victim = m_Pages[m_Resident[oldest]];
+      page.views = victim.views;
+      victim.views = NULL;
+      victim.lastUse = 0;
+      m_Resident[oldest] = pageIndex;
+    }
+    else
+    {
+      page.views = new Descriptor[PageSize];
+      m_Resident.push_back(pageIndex);
+    }
+    RDCEraseMem(page.views, sizeof(Descriptor) * PageSize);
+  }
+  page.lastUse = ++m_Clock;
+  page.views[index % PageSize] = view;
+}
+
+void D3D12DescriptorViewCache::Clear()
+{
+  for(uint32_t page : m_Resident)
+    SAFE_DELETE_ARRAY(m_Pages[page].views);
+  rdcarray<uint32_t>().swap(m_Resident);
+  rdcarray<Page>().swap(m_Pages);
+  m_Clock = 0;
+}
 
 bool WrappedID3D12DescriptorHeap::HasValidDescriptorCache(uint32_t index)
 {
@@ -1163,12 +1311,11 @@ bool WrappedID3D12DescriptorHeap::HasValidDescriptorCache(uint32_t index)
   if((mutableDescriptorBitmask[index / 64] & (1ULL << (index % 64))) != 0)
     return false;
 
-  EnsureDescriptorCache();
-
   // anything that's not mutable is valid once it's been set at least once. Since we
   // zero-initialise, we use bind as a flag (it isn't retrieved from the cache since it depends on
   // the binding)
-  return cachedDescriptors[index].type != DescriptorType::Unknown;
+  const Descriptor *cached = cachedDescriptors.Find(index);
+  return cached && cached->type != DescriptorType::Unknown;
 }
 
 void WrappedID3D12DescriptorHeap::GetFromDescriptorCache(uint32_t index, Descriptor &view)
@@ -1176,29 +1323,19 @@ void WrappedID3D12DescriptorHeap::GetFromDescriptorCache(uint32_t index, Descrip
   if(!mutableDescriptorBitmask)
     return;
 
-  EnsureDescriptorCache();
-
-  view = cachedDescriptors[index];
-}
-
-void WrappedID3D12DescriptorHeap::EnsureDescriptorCache()
-{
-  if(!cachedDescriptors)
-  {
-    D3D12_DESCRIPTOR_HEAP_DESC desc = GetDesc();
-    cachedDescriptors = new Descriptor[desc.NumDescriptors];
-    RDCEraseMem(cachedDescriptors, sizeof(Descriptor) * desc.NumDescriptors);
-  }
+  if(const Descriptor *cached = cachedDescriptors.Find(index))
+    view = *cached;
 }
 
 void WrappedID3D12DescriptorHeap::SetToDescriptorCache(uint32_t index, const Descriptor &view)
 {
-  if(!mutableDescriptorBitmask)
+  // HasValidDescriptorCache always rejects these entries. Do not allocate a
+  // page for values that can never satisfy a later cache lookup.
+  if(!mutableDescriptorBitmask || view.type == DescriptorType::Unknown ||
+     (mutableDescriptorBitmask[index / 64] & (1ULL << (index % 64))) != 0)
     return;
 
-  EnsureDescriptorCache();
-
-  cachedDescriptors[index] = view;
+  cachedDescriptors.Store(index, numDescriptors, view);
 }
 
 WrappedID3D12DescriptorHeap::WrappedID3D12DescriptorHeap(ResourceId id, ID3D12DescriptorHeap *real,
@@ -1228,14 +1365,11 @@ WrappedID3D12DescriptorHeap::WrappedID3D12DescriptorHeap(ResourceId id, ID3D12De
   {
     size_t bitmaskSize = AlignUp(desc.NumDescriptors, 64U) / 64;
 
-    cachedDescriptors = NULL;
-
     mutableDescriptorBitmask = new uint64_t[bitmaskSize];
     RDCEraseMem(mutableDescriptorBitmask, sizeof(uint64_t) * bitmaskSize);
   }
   else
   {
-    cachedDescriptors = NULL;
     mutableDescriptorBitmask = NULL;
   }
 }
@@ -1244,7 +1378,6 @@ WrappedID3D12DescriptorHeap::~WrappedID3D12DescriptorHeap()
 {
   Shutdown();
   SAFE_DELETE_ARRAY(descriptors);
-  SAFE_DELETE_ARRAY(cachedDescriptors);
   SAFE_DELETE_ARRAY(mutableDescriptorBitmask);
 }
 

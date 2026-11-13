@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: replay-contracts-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   portable-contracts:
     name: Replay and AI contracts (${{ matrix.os }})
@@ -49,6 +53,18 @@ jobs:
           --junitxml=${{ runner.temp }}/ai-matrix.xml
       - name: Check release identity
         run: python replaylab/packaging/version_policy.py --check
+      - name: Test cache invalidation and portable visual debugging
+        run: >-
+          python -m pytest -p no:cacheprovider
+          replaylab/mcp_host/tests/test_frame_flow_persistence.py
+          replaylab/mcp_host/tests/test_shader_visual_debug_session.py
+          replaylab/mcp_host/tests/test_shader_visual_debug_ui.py
+          replaylab/mcp_host/tests/test_shader_visual_instrument.py
+          replaylab/mcp_host/tests/test_native_shader_compile.py
+          replaylab/mcp_host/tests/test_dxil_access_signature.py
+          replaylab/tests/test_bridge_console_read_throttle.py
+          replaylab/tests/test_instance_manifest_durability.py
+          --junitxml=${{ runner.temp }}/cache-invalidation.xml
       - name: Test native version output
         run: python -m pytest -p no:cacheprovider replaylab/packaging/tests/test_version_policy.py
       - name: Keep matrix results
@@ -59,3 +75,4 @@ jobs:
           path: |
             ${{ runner.temp }}/replay-matrix.xml
             ${{ runner.temp }}/ai-matrix.xml
+            ${{ runner.temp }}/cache-invalidation.xml

@@ -42,6 +42,7 @@
 #include "strings/string_utils.h"
 #include "d3d12_command_list.h"
 #include "d3d12_command_queue.h"
+#include "d3d12_commit_audit.inl"
 #include "d3d12_debug.h"
 #include "d3d12_device.h"
 #include "d3d12_hooks.h"
@@ -78,6 +79,11 @@ void D3D12Replay::Shutdown()
   bool apiValidation = m_pDevice->GetReplayOptions().apiValidation;
 
   DrainTextureDisplaySubmit();
+  if(!m_GPUPhaseAudits.empty())
+  {
+    if(m_pDevice->DeviceWaitForIdle())
+      FinishGPUPhaseAudit(true);
+  }
 
   // ReplayLab event CBuffer resources are replay-owned and may still be referenced by the cached
   // CPU render state. Restore that state and release every shadow before destroying the device.
@@ -152,7 +158,8 @@ ID3D12Resource *D3D12Replay::ResolveInitialStateCopySource(
 
   // Loading uses the original upload source, so all capture allocations are known before we
   // reserve extra VRAM. Validation/conservative replay also retains the original path for A/B QA.
-  if(m_pDevice->ShouldUseConservativeReplaySync(allowLoading) ||
+  if(Process::GetEnvVariable("RENDERDOC_D3D12_DISABLE_INITIAL_SOURCE_CACHE") == "1" ||
+     m_pDevice->ShouldUseConservativeReplaySync(allowLoading) ||
      desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER)
     return source;
 
@@ -187,6 +194,7 @@ ID3D12Resource *D3D12Replay::ResolveInitialStateCopySource(
   if(desc.Width < 64ULL * 1024)
     return fallback();
 
+  const bool firstBudgetQuery = !m_InitialStateCacheAdapterChecked;
   if(!m_InitialStateCacheAdapterChecked)
   {
     m_InitialStateCacheAdapterChecked = true;
@@ -207,6 +215,14 @@ ID3D12Resource *D3D12Replay::ResolveInitialStateCopySource(
   const D3D12_RESOURCE_ALLOCATION_INFO allocation =
       m_pDevice->GetReal()->GetResourceAllocationInfo(0, 1, &desc);
   const uint64_t reserve = RDCMAX(512ULL * 1024 * 1024, memory.Budget / 8);
+  if(firstBudgetQuery && (Process::GetEnvVariable("RENDERDOC_EID_TIMING") == "1" ||
+                          Process::GetEnvVariable("RENDERDOC_D3D12_SOURCE_BUDGET_LOG") == "1"))
+    AppendReplayTimingLog(StringFormat::Fmt(
+        "api=D3D12InitialSourceBudget localBudgetBytes=%llu currentUsageBytes=%llu "
+        "reserveBytes=%llu cacheLimitBytes=%llu requestedBytes=%llu",
+        (unsigned long long)memory.Budget, (unsigned long long)memory.CurrentUsage,
+        (unsigned long long)reserve, (unsigned long long)(memory.Budget / 3),
+        (unsigned long long)allocation.SizeInBytes));
   if(allocation.SizeInBytes == ~0ULL || memory.CurrentUsage >= memory.Budget ||
      memory.Budget - memory.CurrentUsage <= reserve ||
      allocation.SizeInBytes > memory.Budget - memory.CurrentUsage - reserve ||
@@ -217,6 +233,8 @@ ID3D12Resource *D3D12Replay::ResolveInitialStateCopySource(
   heap.Type = D3D12_HEAP_TYPE_DEFAULT;
   heap.CreationNodeMask = heap.VisibleNodeMask = 1;
   ID3D12Resource *resident = NULL;
+  D3D12CommitAudit commitAudit("fastInitialSource", desc.Width, D3D12_HEAP_TYPE_DEFAULT,
+                               desc.Dimension);
   HRESULT hr = m_pDevice->GetReal()->CreateCommittedResource(
       &heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, NULL,
       __uuidof(ID3D12Resource), (void **)&resident);
@@ -456,18 +474,26 @@ static rdcarray<D3D12InitialSourceWarmupCandidate> OrderInitialSourceWarmup(
   return result;
 }
 
+#include "3rdparty/zstd/xxhash.h"
+#include "d3d12_initial_source_storage.inl"
+#include "d3d12_memory_audit.inl"
+
 RDResult D3D12Replay::ReadLogInitialisation(RDCFile *rdc, bool storeStructuredBuffers)
 {
   RDResult result = m_pDevice->ReadLogInitialisation(rdc, storeStructuredBuffers);
-  if(result != ResultCode::Succeeded || m_pDevice->ShouldUseConservativeReplaySync(true))
+  if(result != ResultCode::Succeeded || m_pDevice->ShouldUseConservativeReplaySync(true) ||
+     Process::GetEnvVariable("RENDERDOC_D3D12_DISABLE_INITIAL_SOURCE_CACHE") == "1")
     return result;
 
   // All captured allocations and the writable-resource set are now known. Pay the one-time
   // upload cost while opening the capture, before the first user gesture, without replaying or
   // changing any captured resource contents. A separate timing API keeps this out of scrub stats.
   ScopedReplayTiming timing("D3D12InitialWarmup", 0, 0, eReplay_Full, true);
-  const bool firstWrite =
-      Process::GetEnvVariable("RENDERDOC_D3D12_INITIAL_SOURCE_CACHE_ORDER") == "first-write";
+  const rdcstr sourceOrder = Process::GetEnvVariable("RENDERDOC_D3D12_INITIAL_SOURCE_CACHE_ORDER");
+  // Prefer positive observed writes within the existing budget. This changes cache admission
+  // order only: unknown sources remain candidates and every required restore still executes.
+  // Explicit legacy/unknown controls retain the original order for independent comparisons.
+  const bool firstWrite = sourceOrder.empty() || sourceOrder == "first-write";
   const bool logPlan = IsReplayTimingActive();
   D3D12ResourceManager *manager = m_pDevice->GetResourceManager();
   std::map<ResourceId, uint32_t> writes;
@@ -538,7 +564,12 @@ RDResult D3D12Replay::ReadLogInitialisation(RDCFile *rdc, bool storeStructuredBu
       return m_pDevice->FatalErrorCheck();
     // Keep the conservative default: there may also be loading-time debug lists pending.
     m_pDevice->ExecuteLists(NULL, true);
-    m_pDevice->FlushLists(true);
+    const bool drained = m_pDevice->FlushLists(true);
+    if(drained && !m_pDevice->HasFatalError() && !storeStructuredBuffers)
+    {
+      RetireD3D12InitialUploadDuplicates(m_pDevice, m_InitialStateSourceCache);
+      DeduplicateD3D12InitialUploadSources(m_pDevice);
+    }
   }
   if(logPlan)
   {
@@ -572,6 +603,8 @@ RDResult D3D12Replay::ReadLogInitialisation(RDCFile *rdc, bool storeStructuredBu
     RDCLOG("%s", line.c_str());
     AppendReplayTimingLog(line);
   }
+  WarmD3D12ParameterReadIndex(m_pDevice);
+  AuditD3D12Memory(m_pDevice);
   return m_pDevice->FatalErrorCheck();
 }
 
@@ -700,14 +733,148 @@ void D3D12Replay::ReplayLog(uint32_t endEventID, ReplayLogType replayType)
   const bool naturalReference = m_ReplayCheckpointBypass && m_ReplayCheckpointNaturalReference &&
                                 !m_EventCBufferStateApplied &&
                                 m_pDevice->GetQueue()->GetCommandData()->m_ActionCallback == NULL;
+  const bool bufferMutationRoot = m_ReplayBufferMutationRoot && !m_EventShaderStateApplied &&
+                                  !m_EventCBufferStateApplied && m_EventCBufferOverrides.empty() &&
+                                  m_pDevice->GetQueue()->GetCommandData()->m_ActionCallback == NULL;
+  const bool shaderMutationRoot =
+      m_ReplayShaderMutationRoot && m_pDevice->CanTrackCheckedShaderMutation() &&
+      !m_EventShaderStateApplied && !m_EventCBufferStateApplied && m_EventCBufferOverrides.empty() &&
+      m_pDevice->GetQueue()->GetCommandData()->m_ActionCallback == NULL;
   m_pDevice->ReplayLog(0, endEventID, replayType, !m_ReplayCheckpointBypass, false, ordinaryTarget,
-                      naturalReference, ordinaryRoot);
+                       naturalReference, ordinaryRoot, bufferMutationRoot, shaderMutationRoot);
+  m_pDevice->AuditReplayDescriptorDecodeCache();
 
   if(ordinaryTarget)
     m_pDevice->CompleteLiveForwardTarget(endEventID);
 
   if(replayType == eReplay_WithoutDraw)
-    m_pDevice->ReplayWorkWaitForIdle();
+  {
+    MarkGPUPhaseAudit(2);
+    const bool defer = ordinaryRoot && !m_pDevice->GetReplayOptions().apiValidation &&
+                       Process::GetEnvVariable("RENDERDOC_D3D12_DEFER_PREFIX_COMPLETION") == "1";
+    PerformanceTimer timer;
+    if(!defer)
+      m_pDevice->ReplayWorkWaitForIdle();
+    if(!defer)
+      FinishGPUPhaseAudit(!m_pDevice->HasFatalError());
+    if(Process::GetEnvVariable("RENDERDOC_EID_TIMING") == "1")
+      AppendReplayTimingLog(
+          StringFormat::Fmt("api=D3D12PostPrefixWait event=%u deferred=%u duration_ms=%.6f",
+                            endEventID, defer ? 1U : 0U, timer.GetMilliseconds()));
+  }
+}
+
+void D3D12Replay::BeginGPUPhaseAudit(uint32_t eventId)
+{
+  // The caller has drained the previous full prefix before entering initial restoration.
+  if(!m_GPUPhaseAudits.empty())
+    FinishGPUPhaseAudit(true);
+  if(Process::GetEnvVariable("RENDERDOC_D3D12_GPU_PHASE_TIMING") != "1" ||
+     Process::GetEnvVariable("RENDERDOC_EID_TIMING") != "1")
+    return;
+  m_GPUPhaseAuditEvent = eventId;
+  D3D12_HEAP_PROPERTIES heap = {};
+  heap.Type = D3D12_HEAP_TYPE_READBACK;
+  heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+  D3D12_RESOURCE_DESC buffer = {};
+  buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  buffer.Width = sizeof(uint64_t) * 3;
+  buffer.Height = buffer.SampleDesc.Count = 1;
+  buffer.DepthOrArraySize = buffer.MipLevels = 1;
+  buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  // Captured COPY queues need optional copy-timestamp support. Skip them rather than assume it.
+  // Every allocation is fixed-size and retired at the existing completion boundary.
+  const auto &queues = m_pDevice->GetQueues();
+  for(WrappedID3D12CommandQueue *wrapped : queues)
+  {
+    if(m_GPUPhaseAudits.size() >= 16)
+      break;
+    if(!wrapped)
+      continue;
+    GPUPhaseAudit probe;
+    probe.queue = wrapped->GetReal();
+    probe.queueId = wrapped->GetResourceID();
+    const D3D12_COMMAND_LIST_TYPE type = probe.queue->GetDesc().Type;
+    if((type != D3D12_COMMAND_LIST_TYPE_DIRECT && type != D3D12_COMMAND_LIST_TYPE_COMPUTE) ||
+       FAILED(probe.queue->GetTimestampFrequency(&probe.frequency)) || !probe.frequency)
+      continue;
+    D3D12_QUERY_HEAP_DESC query = {};
+    query.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    query.Count = 3;
+    bool ok = SUCCEEDED(m_pDevice->GetReal()->CreateQueryHeap(&query, __uuidof(ID3D12QueryHeap),
+                                                              (void **)&probe.queries));
+    ok = ok && SUCCEEDED(m_pDevice->GetReal()->CreateCommittedResource(
+                   &heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST, NULL,
+                   __uuidof(ID3D12Resource), (void **)&probe.readback));
+    ok = ok && SUCCEEDED(m_pDevice->GetReal()->CreateCommandAllocator(
+                   type, __uuidof(ID3D12CommandAllocator), (void **)&probe.allocator));
+    for(uint32_t i = 0; ok && i < 3; i++)
+    {
+      ok = SUCCEEDED(m_pDevice->GetReal()->CreateCommandList(0, type, probe.allocator, NULL,
+                                                             __uuidof(ID3D12GraphicsCommandList),
+                                                             (void **)&probe.markers[i]));
+      if(ok)
+      {
+        probe.markers[i]->EndQuery(probe.queries, D3D12_QUERY_TYPE_TIMESTAMP, i);
+        if(i == 2)
+          probe.markers[i]->ResolveQueryData(probe.queries, D3D12_QUERY_TYPE_TIMESTAMP, 0, 3,
+                                             probe.readback, 0);
+        ok = SUCCEEDED(probe.markers[i]->Close());
+      }
+    }
+    if(ok)
+      m_GPUPhaseAudits.push_back(probe);
+    else
+    {
+      for(auto &marker : probe.markers)
+        SAFE_RELEASE(marker);
+      SAFE_RELEASE(probe.allocator);
+      SAFE_RELEASE(probe.readback);
+      SAFE_RELEASE(probe.queries);
+    }
+  }
+  MarkGPUPhaseAudit(0);
+}
+
+void D3D12Replay::MarkGPUPhaseAudit(uint32_t index)
+{
+  for(GPUPhaseAudit &probe : m_GPUPhaseAudits)
+    if(index < 3 && probe.issued == index)
+    {
+      ID3D12CommandList *list = probe.markers[index];
+      probe.queue->ExecuteCommandLists(1, &list);
+      probe.issued++;
+      m_pDevice->MarkReplayWorkSubmitted(false);
+    }
+}
+
+void D3D12Replay::FinishGPUPhaseAudit(bool completed)
+{
+  if(!completed)
+    return;    // A failed fence never authorises releasing live query storage/allocators.
+  for(GPUPhaseAudit &probe : m_GPUPhaseAudits)
+  {
+    uint64_t *ticks = NULL;
+    D3D12_RANGE read = {0, 3 * sizeof(uint64_t)}, written = {0, 0};
+    if(completed && probe.issued == 3 && SUCCEEDED(probe.readback->Map(0, &read, (void **)&ticks)))
+    {
+      if(ticks[0] <= ticks[1] && ticks[1] <= ticks[2])
+        AppendReplayTimingLog(StringFormat::Fmt(
+            "api=D3D12GPUPhases event=%u queue=%s type=%u initial_interval_ms=%.6f "
+            "prefix_interval_ms=%.6f total_interval_ms=%.6f scope=queueIntervalsIncludingGaps",
+            m_GPUPhaseAuditEvent, ToStr(probe.queueId).c_str(),
+            (uint32_t)probe.queue->GetDesc().Type, (ticks[1] - ticks[0]) * 1000.0 / probe.frequency,
+            (ticks[2] - ticks[1]) * 1000.0 / probe.frequency,
+            (ticks[2] - ticks[0]) * 1000.0 / probe.frequency));
+      probe.readback->Unmap(0, &written);
+    }
+    for(auto &marker : probe.markers)
+      SAFE_RELEASE(marker);
+    SAFE_RELEASE(probe.allocator);
+    SAFE_RELEASE(probe.readback);
+    SAFE_RELEASE(probe.queries);
+  }
+  m_GPUPhaseAudits.clear();
 }
 
 namespace
@@ -4390,9 +4557,16 @@ void D3D12Replay::BuildShader(ShaderEncoding sourceEncoding, const bytebuf &sour
   byteCode.BytecodeLength = dxbcLength;
   byteCode.pShaderBytecode = dxbcBytes;
 
-  WrappedID3D12Shader *sh = WrappedID3D12Shader::AddShader(ResourceId(), byteCode, m_pDevice);
+  bool created = false;
+  WrappedID3D12Shader *sh =
+      WrappedID3D12Shader::AddShader(ResourceId(), byteCode, m_pDevice, &created, true);
 
-  sh->AddRef();
+  // A new replay-only shader's constructor reference belongs to this build.
+  // The lookup table is non-owning: keeping another baseline reference leaks
+  // each temporary target until capture teardown. Existing/captured shaders
+  // instead lend the build one additional reference, balanced by FreeTargetResource.
+  if(!created)
+    sh->AddRef();
 
   id = sh->GetResourceID();
 }
@@ -5052,11 +5226,160 @@ void D3D12Replay::RestoreEventCBufferOverrides()
   m_EventCBufferStateApplied = false;
 }
 
+static bool D3D12ReadOnlyPixelWriteFootprint(const ShaderReflection &original,
+                                             const ShaderReflection &active)
+{
+  return original.stage == ShaderStage::Pixel && active.stage == ShaderStage::Pixel &&
+         !original.rawBytes.empty() && !active.rawBytes.empty() &&
+         (original.encoding == ShaderEncoding::DXBC || original.encoding == ShaderEncoding::DXIL) &&
+         (active.encoding == ShaderEncoding::DXBC || active.encoding == ShaderEncoding::DXIL) &&
+         original.readWriteResources.empty() && active.readWriteResources.empty();
+}
+
+static bool D3D12PixelReadBoundsPreserved(const ShaderReflection &original,
+                                          const ShaderReflection &active)
+{
+  if(!D3D12ReadOnlyPixelWriteFootprint(original, active))
+    return false;
+  // Loading records whole native CBV declarations, not individual field names or observed
+  // dynamic indices. A new PS may read any byte in that old envelope, but may not grow it.
+  // SRV tables/root descriptors already retain their complete bound ranges in the read proof.
+  for(const ConstantBlock &block : active.constantBlocks)
+  {
+    if(!block.bufferBacked || block.inlineDataBytes || !block.byteSize || block.byteSize > 65536 ||
+       !block.bindArraySize || block.bindArraySize > 65536)
+      return false;
+    bool covered = false;
+    for(const ConstantBlock &captured : original.constantBlocks)
+      if(captured.bufferBacked && !captured.inlineDataBytes &&
+         captured.fixedBindSetOrSpace == block.fixedBindSetOrSpace &&
+         captured.byteSize >= block.byteSize && captured.bindArraySize &&
+         block.fixedBindNumber >= captured.fixedBindNumber &&
+         uint64_t(block.fixedBindNumber) - captured.fixedBindNumber + block.bindArraySize <=
+             captured.bindArraySize)
+        covered = true;
+    if(!covered)
+      return false;
+  }
+  return true;
+}
+
 #if ENABLED(ENABLE_UNIT_TESTS)
 
 #include "3rdparty/catch/catch.hpp"
 
-TEST_CASE("D3D12 first-write source warmup is opt-in and never removes unknown sources",
+TEST_CASE("D3D12 immutable-source sharing requires complete byte equality within its budget",
+          "[d3d12][replay][initial-source]")
+{
+  bytebuf a, b;
+  a.resize(2 * 1024 * 1024 + 17);
+  memset(a.data(), 0, a.size());
+  b = a;
+  CHECK(D3D12InitialSourceBytesEqual(a.data(), b.data(), a.size(), []() { return true; }));
+  // Identical prefix/middle/suffix samples must not hide an interior difference.
+  b[12345] = 1;
+  CHECK_FALSE(D3D12InitialSourceBytesEqual(a.data(), b.data(), a.size(), []() { return true; }));
+  b = a;
+  b.back() = 1;
+  CHECK_FALSE(D3D12InitialSourceBytesEqual(a.data(), b.data(), a.size(), []() { return true; }));
+  b = a;
+  size_t chunks = 0;
+  CHECK_FALSE(
+      D3D12InitialSourceBytesEqual(a.data(), b.data(), a.size(), [&]() { return ++chunks < 3; }));
+  CHECK(chunks == 3);
+  alignas(16) byte alignedA[64] = {}, alignedB[64] = {};
+  CHECK(D3D12InitialUploadByteCompare(alignedA, alignedB, sizeof(alignedA)));
+  CHECK(D3D12InitialUploadByteCompare(alignedA + 1, alignedB + 1, 31));
+  alignedB[30] = 1;
+  CHECK_FALSE(D3D12InitialUploadByteCompare(alignedA, alignedB, 31));
+  CHECK_FALSE(D3D12InitialUploadByteCompare(alignedA + 1, alignedB + 1, 31));
+  CHECK(D3D12InitialUploadByteCompare(alignedA, alignedB, 16));
+}
+
+TEST_CASE("D3D12 read-only pixel replacements exclude unclassified write footprints",
+          "[d3d12][replay][shader-dirty]")
+{
+  ShaderReflection original, active;
+  original.stage = active.stage = ShaderStage::Pixel;
+  original.encoding = ShaderEncoding::DXIL;
+  active.encoding = ShaderEncoding::DXBC;
+  CHECK_FALSE(D3D12ReadOnlyPixelWriteFootprint(original, active));
+  original.rawBytes = {1};
+  active.rawBytes = {2};
+  CHECK(D3D12ReadOnlyPixelWriteFootprint(original, active));
+  SECTION("The old Shader could have written UAV contents")
+  {
+    original.readWriteResources.resize(1);
+    CHECK_FALSE(D3D12ReadOnlyPixelWriteFootprint(original, active));
+  }
+  SECTION("The new Shader introduces writes outside the attachment set")
+  {
+    active.readWriteResources.resize(1);
+    CHECK_FALSE(D3D12ReadOnlyPixelWriteFootprint(original, active));
+  }
+  SECTION("Compute and unknown encodings retain conservative invalidation")
+  {
+    active.stage = ShaderStage::Compute;
+    CHECK_FALSE(D3D12ReadOnlyPixelWriteFootprint(original, active));
+    active.stage = ShaderStage::Pixel;
+    active.encoding = ShaderEncoding::SPIRV;
+    CHECK_FALSE(D3D12ReadOnlyPixelWriteFootprint(original, active));
+  }
+}
+
+TEST_CASE("D3D12 pixel replay reuse retains only captured constant-buffer read envelopes",
+          "[d3d12][replay][shader-dirty]")
+{
+  ShaderReflection original, active;
+  original.stage = active.stage = ShaderStage::Pixel;
+  original.encoding = active.encoding = ShaderEncoding::DXIL;
+  original.rawBytes = {1};
+  active.rawBytes = {2};
+  ConstantBlock block;
+  block.bufferBacked = true;
+  block.fixedBindNumber = 3;
+  block.fixedBindSetOrSpace = 2;
+  block.byteSize = 256;
+  block.bindArraySize = 2;
+  original.constantBlocks = {block};
+  active.constantBlocks = {block};
+  CHECK(D3D12PixelReadBoundsPreserved(original, active));
+  active.constantBlocks[0].byteSize = 128;
+  active.constantBlocks[0].fixedBindNumber = 4;
+  active.constantBlocks[0].bindArraySize = 1;
+  CHECK(D3D12PixelReadBoundsPreserved(original, active));
+  SECTION("Growing or relocating reads invalidates captured envelopes")
+  {
+    active.constantBlocks[0].byteSize = 260;
+    CHECK_FALSE(D3D12PixelReadBoundsPreserved(original, active));
+    active.constantBlocks[0] = block;
+    active.constantBlocks[0].fixedBindSetOrSpace++;
+    CHECK_FALSE(D3D12PixelReadBoundsPreserved(original, active));
+    active.constantBlocks[0] = block;
+    active.constantBlocks[0].fixedBindNumber++;
+    CHECK_FALSE(D3D12PixelReadBoundsPreserved(original, active));
+  }
+  SECTION("Unknown and inline declarations are not buffer proofs")
+  {
+    active.constantBlocks[0].byteSize = 0;
+    CHECK_FALSE(D3D12PixelReadBoundsPreserved(original, active));
+    active.constantBlocks[0] = block;
+    active.constantBlocks[0].inlineDataBytes = true;
+    CHECK_FALSE(D3D12PixelReadBoundsPreserved(original, active));
+    active.constantBlocks[0] = block;
+    active.constantBlocks[0].bindArraySize = UINT_MAX;
+    CHECK_FALSE(D3D12PixelReadBoundsPreserved(original, active));
+  }
+  SECTION("Removing unused reads does not grow an envelope")
+  {
+    active.constantBlocks.clear();
+    CHECK(D3D12PixelReadBoundsPreserved(original, active));
+    active.readWriteResources.resize(1);
+    CHECK_FALSE(D3D12PixelReadBoundsPreserved(original, active));
+  }
+}
+
+TEST_CASE("D3D12 first-write source warmup never removes unknown sources",
           "[d3d12][replay][initial-source-warmup]")
 {
   const ResourceId late = ResourceIDGen::GetNewUniqueID();
@@ -5283,7 +5606,6 @@ rdcstr D3D12Replay::ReplaceTargetShaderChecked(ResourceId from, ResourceId to)
 
   ClearPostVSCache();
   ClearFeedbackCache();
-  m_pDevice->InvalidatePreparedReplayCache();
   return {};
 }
 
@@ -5327,7 +5649,6 @@ rdcstr D3D12Replay::RemoveTargetShaderReplacementChecked(ResourceId id)
 
   ClearPostVSCache();
   ClearFeedbackCache();
-  m_pDevice->InvalidatePreparedReplayCache();
   return {};
 }
 
@@ -5353,10 +5674,8 @@ void D3D12Replay::ReleaseRebuildableReplayResources()
     m_pDevice->ExecuteLists();
     m_pDevice->FlushLists(true);
 
-    for(auto &entry : m_InitialStateSourceCache)
-      SAFE_RELEASE(entry.second);
-    m_InitialStateSourceCache.clear();
-    m_InitialStateSourceCacheBytes = 0;
+    m_InitialStateSourceCacheBytes =
+        RetainD3D12CanonicalInitialSources(m_pDevice, m_InitialStateSourceCache);
   }
 
   m_PatchedPSCache.clear();
@@ -5912,6 +6231,23 @@ rdcstr D3D12Replay::PrepareEventShaderScratch(uint32_t eventId, uint32_t outputT
 rdcstr D3D12Replay::RefreshDerivedReplacementsChecked(ResourceId requiredShader)
 {
   D3D12ResourceManager *rm = m_pDevice->GetResourceManager();
+  bool readOnlyPixelShader = false;
+  bool readBoundsPreserved = false;
+  if(requiredShader != ResourceId() && WrappedID3D12Shader::IsShader(requiredShader) &&
+     Process::GetEnvVariable("RENDERDOC_D3D12_DISABLE_READ_ONLY_SHADER_REPLAY_REUSE") != "1")
+  {
+    ID3D12DeviceChild *original = rm->GetResourceWithoutReplacement(requiredShader, true);
+    ID3D12DeviceChild *active = rm->GetResource(requiredShader, true);
+    if(original && active && WrappedID3D12Shader::IsShader(GetResID(active)))
+    {
+      readOnlyPixelShader =
+          D3D12ReadOnlyPixelWriteFootprint(((WrappedID3D12Shader *)original)->GetDetails(),
+                                           ((WrappedID3D12Shader *)active)->GetDetails());
+      readBoundsPreserved =
+          D3D12PixelReadBoundsPreserved(((WrappedID3D12Shader *)original)->GetDetails(),
+                                        ((WrappedID3D12Shader *)active)->GetDetails());
+    }
+  }
 
   struct PendingPipeline
   {
@@ -5961,7 +6297,19 @@ rdcstr D3D12Replay::RefreshDerivedReplacementsChecked(ResourceId requiredShader)
     }
 
     if(usesRequiredShader)
+    {
       requiredUses++;
+      // Direct heap indexing can conceal UAV writes from ordinary reflection. Implicit/unknown
+      // signatures and other stages also retain the existing permanent fallback. Fixed RT/DS
+      // bindings are already included in the captured command's possible-write upper bound.
+      ID3D12RootSignature *nativeRoot =
+          pipe->IsGraphics() ? pipe->graphics->GetRootSigIfPresent() : NULL;
+      WrappedID3D12RootSignature *root =
+          nativeRoot ? rm->GetResAs<WrappedID3D12RootSignature>(GetResID(nativeRoot)) : NULL;
+      if(!root || (root->sig.Flags & (D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
+                                      D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED)))
+        readOnlyPixelShader = false;
+    }
 
     PendingPipeline item;
     item.original = pipesrcid;
@@ -6100,7 +6448,8 @@ rdcstr D3D12Replay::RefreshDerivedReplacementsChecked(ResourceId requiredShader)
       SAFE_RELEASE(created.replacement);
     return "GPU completion could not be confirmed before installing replacement D3D12 pipelines";
   }
-  m_pDevice->InvalidatePreparedReplayCache();
+  m_pDevice->InvalidatePreparedReplayCache(readOnlyPixelShader,
+                                           readOnlyPixelShader && readBoundsPreserved);
 
   if(m_pDevice->HasFatalError())
   {

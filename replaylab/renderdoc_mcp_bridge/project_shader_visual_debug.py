@@ -45,7 +45,7 @@ def source_request(document, workspace, binding, byte_start, byte_end, event_id)
         "captureBinding": dict(binding or {}),
         "workspaceId": str(document.get("workspaceId") or ""),
         "workspacePath": str(workspace.get("workspacePath") or ""),
-        "sourceWorkspaceId": str(workspace.get("workspaceId") or document.get("sourceWorkspaceId") or document.get("workspaceId") or ""),
+        "sourceWorkspaceId": str(workspace.get("sourceWorkspaceId") or document.get("sourceWorkspaceId") or workspace.get("workspaceId") or document.get("workspaceId") or ""),
         "sourcePath": path, "rootSourcePath": str(workspace.get("rootSourcePath") or path),
         "includeRoot": str(workspace.get("includeRoot") or ""),
         "source": source, "sourceSha256": hashlib.sha256(raw).hexdigest(),

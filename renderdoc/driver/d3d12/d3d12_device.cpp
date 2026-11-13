@@ -25,8 +25,8 @@
 #include "d3d12_device.h"
 #include <algorithm>
 #include <memory>
-#include "core/core.h"
 #include "core/api_monitor.h"
+#include "core/core.h"
 #include "core/settings.h"
 #include "data/hlsl/hlsl_cbuffers.h"
 #include "driver/dxgi/dxgi_common.h"
@@ -36,12 +36,13 @@
 #include "driver/ihv/nv/nv_aftermath.h"
 #include "jpeg-compressor/jpge.h"
 #include "maths/formatpacking.h"
-#include "replay/replay_timing.h"
 #include "replay/replay_resource_versions.h"
+#include "replay/replay_timing.h"
 #include "serialise/rdcfile.h"
 #include "strings/string_utils.h"
 #include "d3d12_command_list.h"
 #include "d3d12_command_queue.h"
+#include "d3d12_commit_audit.inl"
 #include "d3d12_debug.h"
 #include "d3d12_rendertext.h"
 #include "d3d12_replay.h"
@@ -510,8 +511,15 @@ static uint32_t D3D12CheckpointConservativeWriteStart(bool directHeap, bool edit
   return directHeap || editedDependencies ? 1U : bufferFirstConsumer;
 }
 
+static bool KeepD3D12ValueEditDirtyProof(bool bindingsUnchanged, bool completeReads,
+                                         bool dirtyValid, bool shaderEdited, bool disabled)
+{
+  return bindingsUnchanged && completeReads && dirtyValid && !shaderEdited && !disabled;
+}
+
 rdcstr WrappedID3D12Device::SetReplayBufferPatches(const rdcarray<ReplayBufferPatch> &patches)
 {
+  PerformanceTimer phaseTimer;
   rdcstr error = ValidateReplayBufferPatches(patches);
   if(!error.empty())
     return error;
@@ -618,7 +626,19 @@ rdcstr WrappedID3D12Device::SetReplayBufferPatches(const rdcarray<ReplayBufferPa
                 patches[i].data == m_ReplayBufferPatches[i].data;
   if(identical)
     return {};
+  const double validateMS = phaseTimer.GetMilliseconds();
+  // Refine even the first edit's whole-buffer binding bound with the immutable native byte
+  // consumer index. Unknown/generated cases keep their conservative union or fail closed.
+  rdcarray<ReplayBufferPatchRange> allRanges;
+  for(const ReplayBufferPatch &patch : patches)
+    allRanges.push_back({patch.buffer, patch.byteOffset, patch.data.size()});
+  uint32_t preciseFirst = ~0U;
+  if(!allRanges.empty() &&
+     m_Queue->GetCommandData()->GetBufferPatchRangeConsumer(bufferExtents, allRanges, preciseFirst) &&
+     preciseFirst != ~0U)
+    firstConsumer = preciseFirst;
   const bool sameLayout = SameD3D12BufferPatchLayout(m_ReplayBufferPatches, patches);
+  const bool firstOverlay = m_ReplayBufferPatches.empty() && !patches.empty();
   rdcarray<ReplayBufferPatchRange> changes;
   const bool deltaKnown = GetReplayBufferPatchChanges(m_ReplayBufferPatches, patches, changes).empty();
   const bool deltaEnabled =
@@ -645,6 +665,7 @@ rdcstr WrappedID3D12Device::SetReplayBufferPatches(const rdcarray<ReplayBufferPa
                                            deltaKnown && !changes.empty() && deltaEnabled
                                        ? changedConsumer
                                        : firstConsumer;
+  const double indexMS = phaseTimer.GetMilliseconds();
 
   ID3D12Resource *upload = NULL;
   rdcarray<uint64_t> offsets;
@@ -717,10 +738,35 @@ rdcstr WrappedID3D12Device::SetReplayBufferPatches(const rdcarray<ReplayBufferPa
   // accepted patch data changes. Do not publish this flag in generic DeviceWaitForIdle: callers
   // there can submit further raw command lists before their batch is marked as pending.
   m_WaitedForIdleAfterReplay = true;
+  const double payloadMS = phaseTimer.GetMilliseconds();
   for(WrappedID3D12CommandQueue *queue : m_Queues)
     if(queue)
       queue->ClearPreparedReplayCache();
-  InvalidateReplayDirtyTracking("sharedBufferEdit");
+  const bool keepDirty = KeepD3D12ValueEditDirtyProof(
+      sameLayout || m_ReplayBufferPatches.empty(), rangeIndexKnown, m_ReplayDirtyValid,
+      m_ReplayDirtyDependenciesEdited,
+      Process::GetEnvVariable("RENDERDOC_D3D12_DISABLE_BUFFER_PATCH_DIRTY_REUSE") == "1");
+  if(Process::GetEnvVariable("RENDERDOC_EID_TIMING") == "1")
+    AppendReplayTimingLog(StringFormat::Fmt(
+        "api=D3D12BufferPatchDirtyProof sameLayout=%u completeReads=%u valid=%u edited=%u "
+        "checkpoints=%u retained=%u dirtyBlocked=%u previousReason=%s",
+        sameLayout ? 1U : 0U, rangeIndexKnown ? 1U : 0U, m_ReplayDirtyValid ? 1U : 0U,
+        m_CheckpointDependenciesEdited ? 1U : 0U,
+        m_ReplayCheckpoints && m_ReplayCheckpoints->config.enabled ? 1U : 0U, keepDirty ? 1U : 0U,
+        m_ReplayDirtyDependenciesEdited ? 1U : 0U, m_ReplayDirtyReason.c_str()));
+  // A complete existing write proof already includes all declared UAV array elements and
+  // every possible bound RT/DS/SO destination, regardless of the previous parameter's branch.
+  // The first validated parameter overlay and same-layout data updates introduce no native
+  // binding/PSO/descriptor-table changes. The complete read index and declared write union also
+  // cover parameter-dependent branches/indices and known indirect signatures. Keep this dirty set
+  // instead of declaring every writable resource unknown on each slider value. Other edits,
+  // Shader changes and incomplete proofs retain the full reset. Checkpoint restoration seeds
+  // every restored resource/alias into this same union in MarkCheckpointReplayWrites; merely
+  // enabling bounded checkpoint storage must not discard an otherwise complete write proof.
+  if(!keepDirty)
+    InvalidateReplayDirtyTracking("sharedBufferEdit");
+  else
+    m_ReplayDirtyReason = "sharedBufferValueKnownWrites";
   InvalidateLiveForward("sharedBufferEdit");
   for(const ReplayBufferPatch &patch : m_ReplayBufferPatches)
     buffers.insert(patch.buffer);
@@ -730,10 +776,12 @@ rdcstr WrappedID3D12Device::SetReplayBufferPatches(const rdcarray<ReplayBufferPa
     auto resource = GetResourceList().find(id);
     if(resource != GetResourceList().end() && resource->second->GetHeap())
       m_ModResources.insert(GetResID(resource->second->GetHeap()));
+    if(keepDirty)
+      MarkReplayResourceDirty(id);
   }
   // A new branch can write a previously unused bound UAV. Restore such destinations from their
   // immutable initial source on future root replays, even if original usage marked them readonly.
-  if(!patches.empty())
+  if(!patches.empty() && !keepDirty)
     for(const auto &entry : GetResourceList())
       if(!ResourceIDGen::IsReplayOnlyID(entry.first) &&
          (entry.second->GetReal()->GetDesc().Flags &
@@ -750,12 +798,14 @@ rdcstr WrappedID3D12Device::SetReplayBufferPatches(const rdcarray<ReplayBufferPa
   m_ReplayBufferPatches = patches;
   m_ReplayBufferPatchFirstConsumer = patches.empty() ? ~0U : firstConsumer;
   m_ReplayBufferPatchFirstAffected =
-      sameLayout && !m_CheckpointDependenciesEdited && affectedConsumer != ~0U &&
+      (sameLayout || (firstOverlay && rangeIndexKnown)) && !m_CheckpointDependenciesEdited &&
+              affectedConsumer != ~0U &&
               Process::GetEnvVariable("RENDERDOC_D3D12_DISABLE_BUFFER_PATCH_PREFIX") != "1"
           ? affectedConsumer
           : 0;
-  // Only same-layout writes cover every old overlay byte. Removing/changing ranges must rebuild
-  // from the original source; values may change all later writes, so keep only earlier points.
+  // First installation has no old overlay bytes to undo. A complete native read proof preserves
+  // earlier canonical points; ApplyCheckpointReplayBufferPatches installs the new bytes after
+  // restoration. Removing/changing existing ranges still needs the original-source reset.
   InvalidateReplayCheckpoints(m_ReplayBufferPatchFirstAffected);
   m_ReplayBufferPatchAnchorEvent = 0;
   if(m_ReplayCheckpoints)
@@ -792,6 +842,14 @@ rdcstr WrappedID3D12Device::SetReplayBufferPatches(const rdcarray<ReplayBufferPa
         m_ReplayBufferPatchAnchorEvent = (--anchor)->first;
     }
   }
+  if(Process::GetEnvVariable("RENDERDOC_EID_TIMING") == "1")
+    AppendReplayTimingLog(StringFormat::Fmt(
+        "api=D3D12BufferPatchPhases validate_ms=%.3f readIndex_ms=%.3f payloadAndDrain_ms=%.3f "
+        "invalidation_ms=%.3f rangeProof=%u firstConsumer=%u affected=%u uploadReused=%u "
+        "dirtyProofRetained=%u",
+        validateMS, indexMS - validateMS, payloadMS - indexMS,
+        phaseTimer.GetMilliseconds() - payloadMS, rangeIndexKnown ? 1U : 0U, firstConsumer,
+        affectedConsumer, reuseUpload ? 1U : 0U, keepDirty ? 1U : 0U));
   // Buffer-patch scrub deliberately preserves the initial-state source cache
   // (initialSourcesPreserved=1 below), so use the lightweight scrub rather than
   // the full release that trims rebuildable replay resources.
@@ -3511,9 +3569,10 @@ void WrappedID3D12Device::ObserveReplaySparseCopy(ResourceId destination, Resour
 
 void WrappedID3D12Device::BeginReplayDirtyRestore(bool allowed)
 {
-  m_ReplayDirtyRecordingAllowed = allowed && !m_CheckpointDependenciesEdited &&
-      !m_ReplayOptions.apiValidation && !D3D12_Debug_SingleSubmitFlushing() &&
-      !D3D12_Debug_RT_Auditing() && m_InitParams.VendorExtensions == GPUVendor::Unknown;
+  m_ReplayDirtyRecordingAllowed =
+      allowed && !m_ReplayDirtyDependenciesEdited && !m_ReplayOptions.apiValidation &&
+      !D3D12_Debug_SingleSubmitFlushing() && !D3D12_Debug_RT_Auditing() &&
+      m_InitParams.VendorExtensions == GPUVendor::Unknown;
   m_ReplayDirtyTiming = Process::GetEnvVariable("RENDERDOC_EID_TIMING") == "1";
   m_ReplayDirtyShadow = Process::GetEnvVariable("RENDERDOC_D3D12_DIRTY_RESTORE_SHADOW") == "1";
   m_ReplayDirtyBufferRangesEnabled =
@@ -3559,6 +3618,14 @@ static bool IsOrdinaryLiveForwardRoot(uint32_t start, ReplayLogType type, bool o
   // cost reference must measure its initial replay even though it may retain dirty-resource proof.
   return start == 0 && type == eReplay_WithoutDraw && ordinaryRoot && allowCheckpoints &&
          !naturalReference && !callback;
+}
+
+static bool CanPublishNaturalReferenceRoot(uint32_t start, ReplayLogType type,
+                                           bool naturalReference, bool callback)
+{
+  // The cost reference still executes its entire canonical prefix. It may publish that result
+  // for the next forward visit, without reusing any checkpoint or old live state itself.
+  return start == 0 && type == eReplay_WithoutDraw && naturalReference && !callback;
 }
 
 static bool CanPublishLiveForwardTarget(uint32_t event, uint32_t pending, uint64_t generation,
@@ -7257,6 +7324,9 @@ bool WrappedID3D12Device::QueueWaitForIdle(ID3D12CommandQueue *queue, ID3D12Fenc
     return D3D12GPUCompletionFailure(this, "idle wait has no valid queue, fence, event or fence value");
 
   const uint64_t required = ++m_WFICounter;
+  PerformanceTimer auditTimer;
+  const bool auditWait = Process::GetEnvVariable("RENDERDOC_D3D12_WAIT_AUDIT") == "1";
+  const uint64_t completedBefore = auditWait ? fence->GetCompletedValue() : 0;
 
   HRESULT hr = queue->Signal(fence, required);
   CHECK_HR(this, hr);
@@ -7282,6 +7352,14 @@ bool WrappedID3D12Device::QueueWaitForIdle(ID3D12CommandQueue *queue, ID3D12Fenc
   CHECK_HR(this, hr);
   const uint64_t completed = fence->GetCompletedValue();
   const bool succeeded = D3D12IdleWaitSucceeded(waitResult, hr, completed, required);
+  if(auditWait)
+    AppendReplayTimingLog(StringFormat::Fmt(
+        "api=D3D12QueueWait queue=%s type=%u completedBefore=%llu required=%llu "
+        "completedAfter=%llu "
+        "duration_ms=%.6f success=%u",
+        ToStr(GetResID(queue)).c_str(), (uint32_t)queue->GetDesc().Type,
+        (unsigned long long)completedBefore, (unsigned long long)required,
+        (unsigned long long)completed, auditTimer.GetMilliseconds(), succeeded ? 1U : 0U));
   if(!succeeded)
     return D3D12GPUCompletionFailure(this, StringFormat::Fmt(
         "idle wait timed out or failed validation: wait=%u completed=%llu required=%llu device=%s",
@@ -7386,6 +7464,45 @@ bool WrappedID3D12Device::ReplayWorkWaitForIdle()
   return true;
 }
 
+void WrappedID3D12Device::AuditReplayDescriptorUsers(ResourceId heap, uint32_t index)
+{
+  D3D12CommandData &cmd = *m_Queue->GetCommandData();
+  uint32_t matches = 0, unknown = 0, firstEvent = 0, firstRange = 0, firstCount = 0;
+  for(const auto &entry : cmd.m_Partial[D3D12CommandData::Primary].cmdListExecs)
+  {
+    const auto found = cmd.m_BakedCmdListInfo.find(entry.first);
+    if(found == cmd.m_BakedCmdListInfo.end())
+      continue;
+    const BakedCmdListInfo &info = found->second;
+    for(uint32_t base : entry.second)
+    {
+      if(base >= cmd.m_RootEventID || uint64_t(base) + info.eventCount >= cmd.m_RootEventID)
+        continue;
+      unknown += info.replayTextureReadsComplete ? 0 : 1;
+      for(const auto &read : info.replayTextureReadOps)
+      {
+        unknown += read.unknown ? 1 : 0;
+        for(const auto &range : read.descriptorRanges)
+          if(range.heap == heap && index >= range.first && index - range.first < range.count)
+          {
+            matches++;
+            if(!firstEvent || base + read.relativeEvent < firstEvent)
+            {
+              firstEvent = base + read.relativeEvent;
+              firstRange = range.first;
+              firstCount = range.count;
+            }
+          }
+      }
+    }
+  }
+  AppendReplayTimingLog(StringFormat::Fmt(
+      "api=D3D12DescriptorUsers rootEvent=%u heap=%s index=%u declaredRangeMatches=%u "
+      "unknownReads=%u firstEvent=%u firstRange=%u firstCount=%u scope=precedingCaptureSubmissions",
+      cmd.m_RootEventID, ToStr(heap).c_str(), index, matches, unknown, firstEvent, firstRange,
+      firstCount));
+}
+
 bool WrappedID3D12Device::ShouldUseConservativeReplaySync(bool allowLoading) const
 {
   // A same-binary switch supports capture-specific A/B timing and image comparisons.
@@ -7396,18 +7513,83 @@ bool WrappedID3D12Device::ShouldUseConservativeReplaySync(bool allowLoading) con
          D3D12_Debug_RT_Auditing();
 }
 
-void WrappedID3D12Device::InvalidatePreparedReplayCache()
+bool WrappedID3D12Device::ReplayDescriptorSlotMutationNeedsWait(const D3D12Descriptor &dst,
+                                                                const D3D12Descriptor &replacement)
 {
+  if(!m_ReplayDescriptorWorkPending && !ShouldUseConservativeReplaySync())
+    return false;
+  const auto shaderView = [](D3D12DescriptorType type) {
+    return type == D3D12DescriptorType::SRV || type == D3D12DescriptorType::UAV ||
+           type == D3D12DescriptorType::CBV || type == D3D12DescriptorType::Sampler;
+  };
+  if(!m_PreciseDescriptorWaitScope || !shaderView(dst.GetType()) ||
+     !shaderView(replacement.GetType()))
+    return true;
+  const char *reason = "unknown";
+  D3D12CommandData &cmd = *m_Queue->GetCommandData();
+  const rdcpair<ResourceId, uint64_t> key = {
+      dst.GetHeapResourceId(), (uint64_t(dst.GetHeapIndex()) << 32) | cmd.m_RootEventID};
+  const auto found = m_DescriptorWaitProofCache.find(key);
+  bool unused = false;
+  if(found != m_DescriptorWaitProofCache.end())
+  {
+    unused = found->second.first;
+    reason = found->second.second;
+  }
+  else
+  {
+    unused = cmd.DescriptorSlotUnusedBefore(dst.GetHeapResourceId(), dst.GetHeapIndex(),
+                                            cmd.m_RootEventID, reason);
+    if(m_DescriptorWaitProofCache.size() < 65536)
+      m_DescriptorWaitProofCache[key] = {unused, reason};
+  }
+  if(m_DescriptorWaitAudit)
+    AppendReplayTimingLog(StringFormat::Fmt(
+        "api=D3D12DescriptorHazard rootEvent=%u heap=%s index=%u wait=%u reason=%s", cmd.m_RootEventID,
+        ToStr(dst.GetHeapResourceId()).c_str(), dst.GetHeapIndex(), unused ? 0U : 1U, reason));
+  return !unused;
+}
+
+void WrappedID3D12Device::InvalidatePreparedReplayCache(bool readOnlyPixelShader,
+                                                        bool readBoundsPreserved)
+{
+  m_ReplayDescriptorCopyCache.clear();
+  m_ReplayDescriptorCopyCacheBytes = 0;
+  m_DescriptorWaitProofCache.clear();
   if(HasFatalError())
     return;
   InvalidateLiveForward("resourceOrShaderReplacement");
-  InvalidateReplayDirtyTracking("resourceOrShaderReplacement");
-  m_CheckpointDependenciesEdited = true;
+  m_ShaderMutationWriteProofAllowed =
+      readOnlyPixelShader && readBoundsPreserved && !m_ReplayDirtyDependenciesEdited &&
+      !m_CheckpointDependenciesEdited &&
+      Process::GetEnvVariable("RENDERDOC_D3D12_DISABLE_SHADER_DIRTY_REUSE") != "1";
+  const bool keepDirty = m_ShaderMutationWriteProofAllowed && m_ReplayDirtyValid;
+  if(!keepDirty)
+    InvalidateReplayDirtyTracking("resourceOrShaderReplacement");
+  else
+    m_ReplayDirtyReason = "readOnlyPixelShaderKnownWrites";
+  // Every previously rendered result is invalidated below. Rebuilding under this Shader
+  // version may still reuse complete loading-time bounds when both read and write envelopes
+  // were proved unchanged; names and field-level reflection are not that proof.
+  m_CheckpointDependenciesEdited |= !readBoundsPreserved;
+  // The complete native write union covers all bound RT/DS destinations, independent of the
+  // old pixel values or discard branches. An admitted read-only PS cannot enlarge that union.
+  // Keep the exact dirty set for its scoped mutation replay, without admitting old result
+  // checkpoints, Shader-derived read extents, descriptor proofs or native command lists.
+  // Once an unclassified edit occurs, this capture keeps the existing conservative fallback.
+  m_ReplayDirtyDependenciesEdited |= !readOnlyPixelShader;
+  if(Process::GetEnvVariable("RENDERDOC_EID_TIMING") == "1")
+    AppendReplayTimingLog(
+        StringFormat::Fmt("api=D3D12DependencyMutation readOnlyPixel=%u readBoundsPreserved=%u "
+                          "dirtyBlocked=%u checkpointBlocked=%u dirtyProofRetained=%u",
+                          readOnlyPixelShader ? 1U : 0U, readBoundsPreserved ? 1U : 0U,
+                          m_ReplayDirtyDependenciesEdited ? 1U : 0U,
+                          m_CheckpointDependenciesEdited ? 1U : 0U, keepDirty ? 1U : 0U));
   InvalidateReplayCheckpoints();
   if(HasFatalError())
     return;
   if(m_ReplayCheckpoints)
-    m_ReplayCheckpoints->editedDependencies = true;
+    m_ReplayCheckpoints->editedDependencies = m_CheckpointDependenciesEdited;
   // Resource/PSO replacement can change descriptors even when no native list was cached. Force
   // their next initial-state restore before the prepared-list early return below.
   if(m_Replay)
@@ -8202,6 +8384,7 @@ RDResult WrappedID3D12Device::ReadLogInitialisation(RDCFile *rdc, bool storeStru
         savedDebugMessages.swap(m_DebugMessages);
       }
 
+      D3D12CommitAudit frameMemory("frameLoad", 0, 0);
       RDResult result = m_Queue->ReplayLog(m_State, 0, 0, false);
 
       if(result != ResultCode::Succeeded)
@@ -10175,6 +10358,12 @@ TEST_CASE("D3D12 live forward requires an ordinary root and the matching success
   CHECK_FALSE(IsOrdinaryLiveForwardRoot(0, eReplay_Full, true, true, false, false));
   CHECK_FALSE(IsOrdinaryLiveForwardRoot(0, eReplay_OnlyDraw, true, true, false, false));
   CHECK_FALSE(IsOrdinaryLiveForwardRoot(1, eReplay_WithoutDraw, true, true, false, false));
+  CHECK(CanPublishNaturalReferenceRoot(0, eReplay_WithoutDraw, true, false));
+  CHECK_FALSE(CanPublishNaturalReferenceRoot(1, eReplay_WithoutDraw, true, false));
+  CHECK_FALSE(CanPublishNaturalReferenceRoot(0, eReplay_WithoutDraw, false, false));
+  CHECK_FALSE(CanPublishNaturalReferenceRoot(0, eReplay_WithoutDraw, true, true));
+  CHECK_FALSE(CanPublishNaturalReferenceRoot(0, eReplay_Full, true, false));
+  CHECK_FALSE(CanPublishNaturalReferenceRoot(0, eReplay_OnlyDraw, true, false));
 
   CHECK(CanPublishLiveForwardTarget(29385, 29385, 7, 7, false));
   // A force/analysis root stages no target; its later normal OnlyDraw cannot revive old state.
@@ -10718,6 +10907,17 @@ TEST_CASE("D3D12 shared value edits retain only same-layout pre-consumer checkpo
   CHECK(D3D12CheckpointConservativeWriteStart(false, false, ~0U) == ~0U);
   CHECK(D3D12CheckpointConservativeWriteStart(true, false, 100) == 1);
   CHECK(D3D12CheckpointConservativeWriteStart(false, true, 100) == 1);
+}
+
+TEST_CASE("D3D12 slider dirty reuse rejects every missing safety condition",
+          "[d3d12][replay][bufferpatch]")
+{
+  CHECK(KeepD3D12ValueEditDirtyProof(true, true, true, false, false));
+  CHECK_FALSE(KeepD3D12ValueEditDirtyProof(false, true, true, false, false));
+  CHECK_FALSE(KeepD3D12ValueEditDirtyProof(true, false, true, false, false));
+  CHECK_FALSE(KeepD3D12ValueEditDirtyProof(true, true, false, false, false));
+  CHECK_FALSE(KeepD3D12ValueEditDirtyProof(true, true, true, true, false));
+  CHECK_FALSE(KeepD3D12ValueEditDirtyProof(true, true, true, false, true));
 }
 
 TEST_CASE("D3D12 checkpoint query storage accounts for shared allocations and active GPU sources",
@@ -11633,8 +11833,28 @@ bool WrappedID3D12Device::RestoreReplayCheckpoint(uint32_t endEventID, uint64_t 
 void WrappedID3D12Device::ReplayLog(uint32_t startEventID, uint32_t endEventID,
                                     ReplayLogType replayType, bool allowCheckpoints,
                                     bool knownShaderFeedback, bool knownOrdinaryTarget,
-                                    bool naturalReference, bool ordinaryRoot)
+                                    bool naturalReference, bool ordinaryRoot,
+                                    bool bufferMutationRoot, bool shaderMutationRoot)
 {
+  struct DescriptorWaitScope
+  {
+    bool &value;
+    bool previous;
+    explicit DescriptorWaitScope(bool &target) : value(target), previous(target) { value = false; }
+    ~DescriptorWaitScope() { value = previous; }
+  } descriptorScope(m_PreciseDescriptorWaitScope);
+  m_DescriptorWaitAudit = Process::GetEnvVariable("RENDERDOC_D3D12_WAIT_AUDIT") == "1";
+  m_ReplayDescriptorDecodeCacheAllowed =
+      !ShouldUseConservativeReplaySync(true) &&
+      Process::GetEnvVariable("RENDERDOC_D3D12_DISABLE_DESCRIPTOR_DECODE_CACHE") != "1";
+  // The slot proof uses complete captured root-table ranges, not observed dynamic Shader
+  // accesses or a parameter value. A validated persistent CBuffer overlay cannot change tables;
+  // indirect signatures cannot set tables either. Unknown metadata still rejects in the proof.
+  m_PreciseDescriptorWaitScope =
+      (ordinaryRoot || bufferMutationRoot || shaderMutationRoot) && startEventID == 0 &&
+      replayType == eReplay_WithoutDraw && !knownShaderFeedback && !m_ReplayDirtyDependenciesEdited &&
+      !ShouldUseConservativeReplaySync() && m_InitParams.VendorExtensions == GPUVendor::Unknown &&
+      Process::GetEnvVariable("RENDERDOC_D3D12_DISABLE_PRECISE_DESCRIPTOR_WAITS") != "1";
   if(HasFatalError())
     return;
   PerformanceTimer liveTimer;
@@ -11642,6 +11862,9 @@ void WrappedID3D12Device::ReplayLog(uint32_t startEventID, uint32_t endEventID,
   const bool eligibleRoot = IsOrdinaryLiveForwardRoot(
       startEventID, replayType, ordinaryRoot, allowCheckpoints, naturalReference,
       m_Queue->GetCommandData()->m_ActionCallback != NULL);
+  const bool publishRoot = eligibleRoot || CanPublishNaturalReferenceRoot(
+                                               startEventID, replayType, naturalReference,
+                                               m_Queue->GetCommandData()->m_ActionCallback != NULL);
   const uint32_t previousLiveEvent = m_LiveForward.eventId;
   const bool liveEnabled = Process::GetEnvVariable("RENDERDOC_D3D12_DISABLE_LIVE_FORWARD") != "1";
   bool liveForward = false;
@@ -11687,10 +11910,20 @@ void WrappedID3D12Device::ReplayLog(uint32_t startEventID, uint32_t endEventID,
   // query. Arbitrary analysis/callback shaders can redirect writes and invalidate this proof.
   const bool trackedReplay = D3D12ReplayPreservesDirtyProof(
       replayType, allowCheckpoints, knownShaderFeedback, knownOrdinaryTarget,
-      m_Queue->GetCommandData()->m_ActionCallback != NULL, m_CheckpointDependenciesEdited,
-      naturalReference);
+      m_Queue->GetCommandData()->m_ActionCallback != NULL, m_ReplayDirtyDependenciesEdited,
+      naturalReference || bufferMutationRoot || shaderMutationRoot);
   if(!trackedReplay)
+  {
+    if(Process::GetEnvVariable("RENDERDOC_EID_TIMING") == "1")
+      AppendReplayTimingLog(StringFormat::Fmt(
+          "api=D3D12DirtyProofRejected type=%u checkpoints=%u feedback=%u target=%u callback=%u "
+          "edited=%u natural=%u bufferMutation=%u",
+          (uint32_t)replayType, allowCheckpoints ? 1U : 0U, knownShaderFeedback ? 1U : 0U,
+          knownOrdinaryTarget ? 1U : 0U, m_Queue->GetCommandData()->m_ActionCallback ? 1U : 0U,
+          m_CheckpointDependenciesEdited ? 1U : 0U, naturalReference ? 1U : 0U,
+          bufferMutationRoot ? 1U : 0U));
     InvalidateReplayDirtyTracking("analysisOrMutation");
+  }
   if(allowCheckpoints && m_ReplayCheckpoints)
     m_ReplayCheckpoints->targetEvent = endEventID;
   bool partial = true;
@@ -11745,6 +11978,8 @@ void WrappedID3D12Device::ReplayLog(uint32_t startEventID, uint32_t endEventID,
 
   if(!partial)
   {
+    if(ordinaryRoot)
+      m_Replay->BeginGPUPhaseAudit(endEventID);
     BeginReplayDirtyRestore(trackedReplay);
     PrepareReplayCheckpointRestore(endEventID, replayType, allowCheckpoints);
     ScopedReplayTimingContext timingContext(ReplayTimingContext::InitialRestore);
@@ -11768,9 +12003,10 @@ void WrappedID3D12Device::ReplayLog(uint32_t startEventID, uint32_t endEventID,
     //
     // Validation and auditing modes intentionally retain the conservative CPU synchronisation.
     // If any queue dependency cannot be installed, fail closed and use the old full waits.
-    const bool deferInitialStateWait = !m_ReplayOptions.apiValidation &&
-                                       !D3D12_Debug_SingleSubmitFlushing() &&
-                                       !D3D12_Debug_RT_Auditing();
+    const bool deferInitialStateWait =
+        !m_ReplayOptions.apiValidation &&
+        Process::GetEnvVariable("RENDERDOC_D3D12_FORCE_INITIAL_COMPLETION") != "1" &&
+        !D3D12_Debug_SingleSubmitFlushing() && !D3D12_Debug_RT_Auditing();
     if(!deferInitialStateWait || !InstallInitialStateQueueDependencies())
     {
       ScopedReplayTimingContext fallbackContext(ReplayTimingContext::InitialFallback);
@@ -11781,6 +12017,8 @@ void WrappedID3D12Device::ReplayLog(uint32_t startEventID, uint32_t endEventID,
     // Only now have the canonical initial commands actually been submitted and made visible to
     // every following replay queue. Subsequent captured writes/mappings invalidate these seeds.
     CompleteReplaySparseInitialBaselines();
+    if(ordinaryRoot)
+      m_Replay->MarkGPUPhaseAudit(1);
 
     // clear any previous ray dispatch references
     D3D12CommandData &cmd = *m_Queue->GetCommandData();
@@ -11858,10 +12096,13 @@ void WrappedID3D12Device::ReplayLog(uint32_t startEventID, uint32_t endEventID,
     }
 
     RDResult result = ResultCode::Succeeded;
-    const bool allowPreparedReplay =
-        replayType == eReplay_Full && !partial && !m_ReplayOptions.apiValidation &&
-        !D3D12_Debug_SingleSubmitFlushing() &&
-        !D3D12_Debug_RT_Auditing();
+    const bool ordinaryPreparedPrefix =
+        replayType == eReplay_WithoutDraw && ordinaryRoot && m_ReplayBufferPatches.empty() &&
+        Process::GetEnvVariable("RENDERDOC_D3D12_ENABLE_PREFIX_COMMAND_REUSE") == "1";
+    const bool allowPreparedReplay = (replayType == eReplay_Full || ordinaryPreparedPrefix) &&
+                                     !partial && !m_ReplayOptions.apiValidation &&
+                                     !D3D12_Debug_SingleSubmitFlushing() &&
+                                     !D3D12_Debug_RT_Auditing();
 
     {
       ScopedReplayTimingContext timingContext(ReplayTimingContext::ContextReplay);
@@ -11872,7 +12113,7 @@ void WrappedID3D12Device::ReplayLog(uint32_t startEventID, uint32_t endEventID,
                                     allowPreparedReplay, allowCheckpoints);
       else if(replayType == eReplay_WithoutDraw)
         result = m_Queue->ReplayLog(m_State, startEventID, RDCMAX(1U, endEventID) - 1, partial,
-                                    false, allowCheckpoints);
+                                    allowPreparedReplay, allowCheckpoints);
       else if(replayType == eReplay_OnlyDraw)
         result = m_Queue->ReplayLog(m_State, endEventID, endEventID, partial);
       else
@@ -11960,8 +12201,7 @@ void WrappedID3D12Device::ReplayLog(uint32_t startEventID, uint32_t endEventID,
     InvalidateLiveForward("replayFinishListMissing");
     InvalidateReplaySparseInitialBaselines("replayFinishListMissing");
   }
-  if(eligibleRoot && list && !HasFatalError() &&
-     replaySucceeded)
+  if(publishRoot && list && !HasFatalError() && replaySucceeded)
   {
     m_LiveForward.pendingTarget = endEventID;
     m_LiveForward.pendingGeneration = m_LiveForward.generation;

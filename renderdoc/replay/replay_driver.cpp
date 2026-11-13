@@ -117,7 +117,7 @@ namespace
 thread_local ScopedReplayTiming *activeReplayTiming = NULL;
 thread_local ScopedReplayTimingChunk *activeReplayChunk = NULL;
 const ReplayTimingSection chunkSections[] = {
-    ReplayTimingSection::ChunkDecode, ReplayTimingSection::ChunkExecute,
+    ReplayTimingSection::ChunkDecode,       ReplayTimingSection::ChunkExecute,
     ReplayTimingSection::ChunkUnclassified, ReplayTimingSection::ExplicitWait,
     ReplayTimingSection::ExplicitSubmit,
 };
@@ -147,31 +147,72 @@ double ReplayTicksToMS(uint64_t ticks)
 }
 
 const char *sectionNames[] = {
-    "applyInitial", "contextReplay", "explicitWait", "explicitSubmit", "initialDescriptors",
-    "initialCPUCopy", "initialGPUCopy", "initialSparseBinds", "initialAccelerationStructures",
-    "initialBarriers", "initialResidency", "initialListClose", "resetAllocators",
-    "replaySetup", "replayBookkeeping", "chunkFraming", "chunkDecode", "chunkExecute",
+    "applyInitial",      "contextReplay",      "explicitWait",
+    "explicitSubmit",    "initialDescriptors", "initialCPUCopy",
+    "initialGPUCopy",    "initialSparseBinds", "initialAccelerationStructures",
+    "initialBarriers",   "initialResidency",   "initialListClose",
+    "resetAllocators",   "replaySetup",        "replayBookkeeping",
+    "chunkFraming",      "chunkDecode",        "chunkExecute",
     "chunkUnclassified", "replayMetadata",
 };
 const char *contextNames[] = {
-    "unspecified", "replayReset", "initialRestore", "initialFallback", "contextReplay",
-    "replayFinish", "queueSignal", "dataUploadSync", "dataUploadPoolReuse", "mapDataWrite",
-    "writeToSubresource", "preparedCacheInvalidate", "debugSingleSubmit", "descriptorWrite",
-    "descriptorCopy", "queueTransition",
+    "unspecified",         "replayReset",       "initialRestore",     "initialFallback",
+    "contextReplay",       "replayFinish",      "queueSignal",        "dataUploadSync",
+    "dataUploadPoolReuse", "mapDataWrite",      "writeToSubresource", "preparedCacheInvalidate",
+    "debugSingleSubmit",   "descriptorWrite",   "descriptorCopy",     "queueTransition",
+    "capturedFence",       "hostRestoreHazard",
 };
 const char *counterNames[] = {
-    "initialResources", "initialDescriptorHeaps", "initialDescriptors", "initialDescriptorRanges",
-    "initialDescriptorFullRestores", "initialDescriptorsSkipped", "initialBuffers",
-    "initialTextures", "initialHeaps", "initialReadOnlySkipped", "initialAccelerationStructures",
-    "initialAccelerationStructuresSkipped", "initialCPUCopyResources", "initialCPUCopyBytes",
-    "initialGPUCopyResources", "initialGPUCopyBufferBytes", "initialGPUCopyFootprintBytes",
-    "initialGPUCopyWholeResources", "initialUploadCacheHits", "initialUploadCacheBytes",
-    "initialUploadCachePromotedBytes", "initialUploadCacheFallbackBytes", "initialSparseResources", "initialBarriers",
-    "initialCommandLists", "internalListsCreated", "internalListsReused", "internalListsSubmitted",
-    "dataUploadListsCreated", "dataUploadPoolResets", "queueSignalsDeferred",
-    "queueSignalsConservative", "descriptorWriteWaits", "descriptorCopyWaits",
-    "descriptorWritesSkipped", "descriptorCopiesSkipped",
-    "chunksProcessed", "chunkBytes", "chunkDecodeBoundaries", "chunkDecodeBoundaryMissing",
+    "initialResources",
+    "initialDescriptorHeaps",
+    "initialDescriptors",
+    "initialDescriptorRanges",
+    "initialDescriptorFullRestores",
+    "initialDescriptorsSkipped",
+    "initialBuffers",
+    "initialTextures",
+    "initialHeaps",
+    "initialReadOnlySkipped",
+    "initialAccelerationStructures",
+    "initialAccelerationStructuresSkipped",
+    "initialCPUCopyResources",
+    "initialCPUCopyBytes",
+    "initialGPUCopyResources",
+    "initialGPUCopyBufferBytes",
+    "initialGPUCopyFootprintBytes",
+    "initialGPUCopyWholeResources",
+    "initialUploadCacheHits",
+    "initialUploadCacheBytes",
+    "initialUploadCachePromotedBytes",
+    "initialUploadCacheFallbackBytes",
+    "initialSparseResources",
+    "initialBarriers",
+    "initialCommandLists",
+    "internalListsCreated",
+    "internalListsReused",
+    "internalListsSubmitted",
+    "dataUploadListsCreated",
+    "dataUploadPoolResets",
+    "queueSignalsDeferred",
+    "queueSignalsConservative",
+    "descriptorWriteWaits",
+    "descriptorCopyWaits",
+    "descriptorWritesSkipped",
+    "descriptorCopiesSkipped",
+    "chunksProcessed",
+    "chunkBytes",
+    "chunkDecodeBoundaries",
+    "chunkDecodeBoundaryMissing",
+    "initialClearBytes",
+    "initialClearResources",
+    "initialLayoutResources",
+    "initialQueryResets",
+    "hostWriteCacheHits",
+    "hostWriteGPUBytes",
+    "decodedCommandCacheHits",
+    "decodedCommandCacheBytes",
+    "preparedModes",
+    "initialOverwrittenBytesSkipped",
 };
 static_assert(ARRAY_COUNT(sectionNames) == (size_t)ReplayTimingSection::Count,
               "Every timing section must have a stable log key");
@@ -277,10 +318,9 @@ ScopedReplayTiming::~ScopedReplayTiming()
                                 sectionNames[i], ReplayTicksToMS(section.ticks), sectionNames[i],
                                 ReplayTicksToMS(section.selfTicks), sectionNames[i], section.calls);
   }
-  line += StringFormat::Fmt(" unscoped_ms=%.3f",
-                            ReplayTicksToMS(totalTicks > sectionSelfTicks
-                                                ? totalTicks - sectionSelfTicks
-                                                : 0));
+  line += StringFormat::Fmt(
+      " unscoped_ms=%.3f",
+      ReplayTicksToMS(totalTicks > sectionSelfTicks ? totalTicks - sectionSelfTicks : 0));
   for(size_t i = 0; i < (size_t)ReplayTimingContext::Count; i++)
   {
     const ReplayTimingData::Wait &wait = m_Data->waits[i];
@@ -306,17 +346,17 @@ ScopedReplayTiming::~ScopedReplayTiming()
     return m_Data->chunks[a].TotalTicks() > m_Data->chunks[b].TotalTicks();
   });
   ReplayTimingData::Chunk remainder;
-  auto logChunk = [this, replayDepth](uint32_t id, const ReplayTimingData::Chunk &chunk, const char *name) {
+  auto logChunk = [this, replayDepth](uint32_t id, const ReplayTimingData::Chunk &chunk,
+                                      const char *name) {
     rdcstr record = StringFormat::Fmt(
         "api=ReplayChunk driver=%s range=%u->%u type=%s chunkId=%u chunk=%s calls=%u "
         "decodeBoundaries=%u decode_ms=%.3f execute_ms=%.3f unclassified_ms=%.3f "
         "decode_self_ms=%.3f execute_self_ms=%.3f unclassified_self_ms=%.3f "
         "wait_ms=%.3f submit_ms=%.3f total_ms=%.3f replay_depth=%u",
-        m_Driver, m_StartEventID, m_EndEventID, ReplayTypeName(m_ReplayType), id, name,
-        chunk.calls, chunk.decoded, ReplayTicksToMS(chunk.ticks[0]),
-        ReplayTicksToMS(chunk.ticks[1]), ReplayTicksToMS(chunk.ticks[2]),
-        ReplayTicksToMS(chunk.selfTicks[0]), ReplayTicksToMS(chunk.selfTicks[1]),
-        ReplayTicksToMS(chunk.selfTicks[2]),
+        m_Driver, m_StartEventID, m_EndEventID, ReplayTypeName(m_ReplayType), id, name, chunk.calls,
+        chunk.decoded, ReplayTicksToMS(chunk.ticks[0]), ReplayTicksToMS(chunk.ticks[1]),
+        ReplayTicksToMS(chunk.ticks[2]), ReplayTicksToMS(chunk.selfTicks[0]),
+        ReplayTicksToMS(chunk.selfTicks[1]), ReplayTicksToMS(chunk.selfTicks[2]),
         ReplayTicksToMS(chunk.ticks[3]), ReplayTicksToMS(chunk.ticks[4]),
         ReplayTicksToMS(chunk.TotalTicks()), replayDepth);
     RDCLOG("[EIDTiming] %s", record.c_str());
@@ -442,7 +482,7 @@ ScopedReplayTimingChunk::~ScopedReplayTimingChunk()
         m_Replay->m_Data->sections[(size_t)chunkSections[i]].selfTicks - m_SectionSelfTicks[i];
   AddReplayTimingCounter(ReplayTimingCounter::ChunksProcessed);
   AddReplayTimingCounter(m_Decoded ? ReplayTimingCounter::ChunkDecodeBoundaries
-                                 : ReplayTimingCounter::ChunkDecodeBoundaryMissing);
+                                   : ReplayTimingCounter::ChunkDecodeBoundaryMissing);
 }
 
 ScopedReplayTimingContext::ScopedReplayTimingContext(ReplayTimingContext context)
@@ -570,8 +610,8 @@ rdcstr GetReplayBufferPatchChanges(const rdcarray<ReplayBufferPatch> &previous,
 
     if(!updated || (old && old->buffer < updated->buffer))
     {
-      complete = append(old->buffer, old->byteOffset + oldConsumed,
-                        old->byteOffset + old->data.size());
+      complete =
+          append(old->buffer, old->byteOffset + oldConsumed, old->byteOffset + old->data.size());
       oldConsumed = old->data.size();
     }
     else if(!old || updated->buffer < old->buffer)
@@ -788,7 +828,8 @@ rdcarray<ReplayBufferPatch> ReplayBufferPatchSet::Flatten() const
           suffix.buffer = old.buffer;
           suffix.byteOffset = layerEnd;
           suffix.data.resize(size_t(oldEnd - layerEnd));
-          memcpy(suffix.data.data(), old.data.data() + size_t(layerEnd - old.byteOffset), suffix.data.size());
+          memcpy(suffix.data.data(), old.data.data() + size_t(layerEnd - old.byteOffset),
+                 suffix.data.size());
           next.push_back(suffix);
         }
       }
@@ -2684,7 +2725,8 @@ TEST_CASE("Checkpoint policy changes preserve versions only inside compatible st
   CHECK_FALSE(ReplayCheckpointStorageCompatible(previous, next));
 }
 
-TEST_CASE("Shared buffer edits preserve range identity and overlapping undo", "[replay][bufferpatch]")
+TEST_CASE("Shared buffer edits preserve range identity and overlapping undo",
+          "[replay][bufferpatch]")
 {
   ResourceId a = ResourceIDGen::GetNewUniqueID();
   ResourceId b = ResourceIDGen::GetNewUniqueID();
@@ -2713,7 +2755,8 @@ TEST_CASE("Shared buffer edits preserve range identity and overlapping undo", "[
   CHECK(edits.Flatten().empty());
 }
 
-TEST_CASE("Shared buffer edits reject invalid transactions without losing old values", "[replay][bufferpatch]")
+TEST_CASE("Shared buffer edits reject invalid transactions without losing old values",
+          "[replay][bufferpatch]")
 {
   ResourceId id = ResourceIDGen::GetNewUniqueID();
   ReplayBufferPatchSet edits;
@@ -2995,8 +3038,7 @@ TEST_CASE("Shared buffer patch deltas match an independent byte coverage oracle"
       const uint32_t state = encoded % 3;
       if(state == 0)
         continue;
-      if(merge && !patches.empty() &&
-         patches.back().byteOffset + patches.back().data.size() == offset)
+      if(merge && !patches.empty() && patches.back().byteOffset + patches.back().data.size() == offset)
         patches.back().data.push_back(byte(state - 1));
       else
         patches.push_back({buffer, offset, {byte(state - 1)}});
@@ -3011,7 +3053,7 @@ TEST_CASE("Shared buffer patch deltas match an independent byte coverage oracle"
       INFO("old coverage/value state " << oldState << ", new state " << newState);
       rdcarray<ReplayBufferPatchRange> changes;
       REQUIRE(GetReplayBufferPatchChanges(patchesFor(oldState, oldState % 2 != 0),
-                                         patchesFor(newState, newState % 2 == 0), changes)
+                                          patchesFor(newState, newState % 2 == 0), changes)
                   .empty());
       bytebuf expected = {0, 0, 0};
       uint32_t oldDigits = oldState, newDigits = newState;
@@ -3227,7 +3269,8 @@ TEST_CASE("Serialiser parameter boundary callback is read-only and opt-in", "[re
   CHECK(callbacks == 1);
 }
 
-TEST_CASE("Replay chunk summary keeps waits overlapping and unknown routes explicit", "[replay][timing]")
+TEST_CASE("Replay chunk summary keeps waits overlapping and unknown routes explicit",
+          "[replay][timing]")
 {
   ReplayTimingData::Chunk decoded;
   decoded.calls = decoded.decoded = 1;

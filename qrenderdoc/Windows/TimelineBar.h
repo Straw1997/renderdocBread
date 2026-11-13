@@ -47,6 +47,9 @@ public:
   void OnCaptureClosed() override;
   void OnSelectedEventChanged(uint32_t eventId) override {}
   void OnEventChanged(uint32_t eventId) override;
+  // Input position is independent of the last completed GPU replay.
+  void OnReplayNavigationRequested(uint32_t eventId);
+  void CancelReplayNavigation();
 
 protected:
   void mousePressEvent(QMouseEvent *e) override;
@@ -110,6 +113,8 @@ private:
   QVector<uint32_t> m_RootActions;
   QVector<uint32_t> m_Actions;
   uint32_t m_DisplayedEventID = 0;
+  uint32_t m_NavigationEventID = 0;
+  bool m_NavigationPending = false;
 
   ResourceId m_HistoryID;
   QString m_HistoryTarget;

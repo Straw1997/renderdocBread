@@ -23,6 +23,7 @@
  * THE SOFTWARE.
  ******************************************************************************/
 
+#include <cfloat>
 #include <cmath>
 #include "android/android.h"
 #include "api/replay/renderdoc_replay.h"

@@ -1455,7 +1455,8 @@ bool WrappedID3D12CommandQueue::Serialise_Signal(SerialiserType &ser, ID3D12Fenc
     if(!SyncReplayQueueForSubmission(pQueue))
       return false;
     Unwrap(pQueue)->Signal(Unwrap(pFence), Value);
-    if(m_pDevice->ShouldUseConservativeReplaySync())
+    if(m_pDevice->ShouldUseConservativeReplaySync() ||
+       Process::GetEnvVariable("RENDERDOC_D3D12_FORCE_SIGNAL_COMPLETION") == "1")
     {
       AddReplayTimingCounter(ReplayTimingCounter::QueueSignalsConservative);
       m_pDevice->ReplayWorkWaitForIdle();

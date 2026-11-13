@@ -197,6 +197,26 @@ PipelineStateViewer::PipelineStateViewer(ICaptureContext &ctx, QWidget *parent)
 {
   ui->setupUi(this);
 
+  m_DetailsTimer = new QTimer(this);
+  m_DetailsTimer->setSingleShot(true);
+  m_DetailsTimer->setInterval(75);
+  m_DetailsNotice = new QLabel(tr("Pipeline details update after replay interaction pauses."), this);
+  m_DetailsNotice->setMargin(4);
+  m_DetailsNotice->setAutoFillBackground(true);
+  m_DetailsNotice->setBackgroundRole(QPalette::ToolTipBase);
+  m_DetailsNotice->setForegroundRole(QPalette::ToolTipText);
+  m_DetailsNotice->adjustSize();
+  m_DetailsNotice->move(4, 4);
+  m_DetailsNotice->hide();
+  QObject::connect(m_DetailsTimer, &QTimer::timeout, this, [this]() {
+    if(!m_Ctx.IsCaptureLoaded() || !isVisible())
+      return;
+    if(m_Ctx.IsScrubbing())
+      m_DetailsTimer->start();
+    else if(m_DetailsPending)
+      OnEventChanged(m_Ctx.CurEvent());
+  });
+
   ui->thumbnail->SetContext(m_Ctx);
   ui->layout->removeWidget(ui->thumbnail);
 
@@ -279,6 +299,14 @@ void PipelineStateViewer::RT_UpdateAndDisplay(IReplayController *r)
 
 void PipelineStateViewer::OnCaptureClosed()
 {
+  m_DetailsTimer->stop();
+  if(m_DetailsPending)
+    setToolTip(m_PreviousToolTip);
+  m_DetailsPending = false;
+  setAttribute(Qt::WA_TransparentForMouseEvents, false);
+  m_DetailsNotice->hide();
+  // i18n-ignore: native publication evidence, never a visible label.
+  setProperty("replayDetailsPending", false);
   if(m_Current)
     m_Current->OnCaptureClosed();
 }
@@ -286,6 +314,20 @@ void PipelineStateViewer::OnCaptureClosed()
 void PipelineStateViewer::OnEventChanged(uint32_t eventId)
 {
   RENDERDOC_PROFILEFUNCTION();
+
+  if(m_Ctx.IsScrubbing() || !isVisible())
+  {
+    DeferDetails();
+    return;
+  }
+  m_DetailsTimer->stop();
+  if(m_DetailsPending)
+    setToolTip(m_PreviousToolTip);
+  m_DetailsPending = false;
+  setAttribute(Qt::WA_TransparentForMouseEvents, false);
+  m_DetailsNotice->hide();
+  // i18n-ignore: native publication evidence, never a visible label.
+  setProperty("replayDetailsPending", false);
 
   if(m_Ctx.APIProps().pipelineType == GraphicsAPI::D3D11)
     setToD3D11();
@@ -298,6 +340,32 @@ void PipelineStateViewer::OnEventChanged(uint32_t eventId)
 
   if(m_Current)
     m_Current->OnEventChanged(eventId);
+}
+
+void PipelineStateViewer::DeferDetails()
+{
+  if(!m_DetailsPending)
+  {
+    m_PreviousToolTip = toolTip();
+    setToolTip(tr("Pipeline details update after replay interaction pauses."));
+  }
+  m_DetailsPending = true;
+  // Do not recursively enable/disable hundreds of child widgets: that invalidates Qt styles
+  // and size hints on every pointer gesture. A local notice guards delayed details instead.
+  setAttribute(Qt::WA_TransparentForMouseEvents, true);
+  m_DetailsNotice->show();
+  m_DetailsNotice->raise();
+  // i18n-ignore: native publication evidence, never a visible label.
+  setProperty("replayDetailsPending", true);
+  if(isVisible())
+    m_DetailsTimer->start();
+}
+
+void PipelineStateViewer::OnScrubEvent(uint32_t eventId)
+{
+  // The old details still correspond to the currently displayed frame until a new event is
+  // published. Only OnEventChanged may mark those details pending; input itself must stay cheap.
+  m_DetailsTimer->stop();
 }
 
 QString PipelineStateViewer::GetCurrentAPI()
@@ -1339,6 +1407,8 @@ static bool HasShaderWorkspaceIntent(ICaptureContext &ctx, ShaderStage stage)
 
 void PipelineStateViewer::showEvent(QShowEvent *event)
 {
+  if(m_DetailsPending && m_Ctx.IsCaptureLoaded())
+    m_DetailsTimer->start(0);
   // we didn't set any default pipeline state in case it would be overridden by the persist data.
   // But if we don't have any persist data and we're about to show, default to D3D11.
   if(m_Current == NULL)

@@ -26,6 +26,7 @@
 #include "core/settings.h"
 #include "driver/dxgi/dxgi_common.h"
 #include "driver/ihv/nv/nv_aftermath.h"
+#include "d3d12_commit_audit.inl"
 #include "d3d12_resources.h"
 
 RDOC_EXTERN_CONFIG(bool, Replay_Debug_SingleThreadedCompilation);
@@ -35,6 +36,7 @@ static RDResult DeferredPipelineCompile(ID3D12Device2 *device2,
                                         const D3D12_EXPANDED_PIPELINE_STATE_STREAM_DESC &Descriptor,
                                         WrappedID3D12PipelineState *wrappedPipe)
 {
+  D3D12CommitAudit compileAudit("pipelineCompile", 0, 0, 0, GetResID(wrappedPipe));
   D3D12_PACKED_PIPELINE_STATE_STREAM_DESC unwrappedDesc(Descriptor);
   unwrappedDesc.Unwrap();
 

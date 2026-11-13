@@ -549,6 +549,39 @@ public:
               rdcarray<rdcpair<uint64_t, uint64_t>> &ranges, size_t &work) const;
 };
 
+// Optional decoded inspector views, not GPU descriptors or captured descriptor contents.
+// Large bindless heaps normally expose only a few slots at a time. Keep O(1) page
+// lookup while bounding decoded data even if a tool walks every slot in the heap.
+class D3D12DescriptorViewCache
+{
+public:
+  static const uint32_t PageSize = 256;
+  static const uint32_t MaxPages = 128;
+  D3D12DescriptorViewCache() = default;
+  ~D3D12DescriptorViewCache() { Clear(); }
+  D3D12DescriptorViewCache(const D3D12DescriptorViewCache &) = delete;
+  D3D12DescriptorViewCache &operator=(const D3D12DescriptorViewCache &) = delete;
+  const Descriptor *Find(uint32_t index);
+  void Store(uint32_t index, uint32_t descriptorCount, const Descriptor &view);
+  void Clear();
+  size_t ResidentPages() const { return m_Resident.size(); }
+  size_t AllocatedBytes() const
+  {
+    return m_Pages.capacity() * sizeof(Page) + m_Resident.capacity() * sizeof(uint32_t) +
+           m_Resident.size() * PageSize * sizeof(Descriptor);
+  }
+
+private:
+  struct Page
+  {
+    Descriptor *views = NULL;
+    uint64_t lastUse = 0;
+  };
+  rdcarray<Page> m_Pages;
+  rdcarray<uint32_t> m_Resident;
+  uint64_t m_Clock = 0;
+};
+
 class WrappedID3D12DescriptorHeap : public WrappedDeviceChild12<ID3D12DescriptorHeap>,
                                     public IRenderDocDescriptorNamer
 {
@@ -560,7 +593,7 @@ class WrappedID3D12DescriptorHeap : public WrappedDeviceChild12<ID3D12Descriptor
 
   D3D12Descriptor *descriptors;
 
-  Descriptor *cachedDescriptors;
+  D3D12DescriptorViewCache cachedDescriptors;
   uint64_t *mutableDescriptorBitmask;
 
   D3D12DescriptorRestoreTracker m_InitialDescriptorDirty;
@@ -644,7 +677,6 @@ public:
   void InvalidateInitialDescriptorRestore();
   void RestoreInitialDescriptors(WrappedID3D12DescriptorHeap *source, bool forceFullRestore);
 
-  void EnsureDescriptorCache();
   bool HasValidDescriptorCache(uint32_t index);
   void GetFromDescriptorCache(uint32_t index, Descriptor &view);
   void SetToDescriptorCache(uint32_t index, const Descriptor &view);
@@ -983,14 +1015,18 @@ public:
       m_InternalResources = internalResources;
     }
 
-    ShaderEntry(ResourceId id, const D3D12_SHADER_BYTECODE &byteCode, WrappedID3D12Device *device)
+    ShaderEntry(ResourceId id, const D3D12_SHADER_BYTECODE &byteCode, WrappedID3D12Device *device,
+                bool temporary = false)
         : WrappedDeviceChild12(id, NULL, device), m_Key(byteCode)
     {
       m_Bytecode.assign((const byte *)byteCode.pShaderBytecode, byteCode.BytecodeLength);
       m_DXBCFile = NULL;
       m_Details = new ShaderReflection;
 
-      if(!m_InternalResources)
+      // Transient compiler outputs are owned by ReplayController/PSOs, not the
+      // immutable captured-resource catalog. Do not retain a catalog row for
+      // each temporary compilation after its Shader object has been freed.
+      if(!m_InternalResources && !temporary)
       {
         device->AddResource(GetResourceID(), ResourceType::Shader, "Shader");
 
@@ -1018,13 +1054,17 @@ public:
     ShaderEntry &operator=(const ShaderEntry &e) = delete;
 
     static ShaderEntry *AddShader(ResourceId id, const D3D12_SHADER_BYTECODE &byteCode,
-                                  WrappedID3D12Device *device)
+                                  WrappedID3D12Device *device, bool *created = NULL,
+                                  bool temporary = false)
     {
       DXBCKey key(byteCode);
       ShaderEntry *shader = m_Shaders[key];
 
+      if(created)
+        *created = shader == NULL;
+
       if(shader == NULL)
-        shader = m_Shaders[key] = new ShaderEntry(id, byteCode, device);
+        shader = m_Shaders[key] = new ShaderEntry(id, byteCode, device, temporary);
 
       return shader;
     }
@@ -1047,6 +1087,7 @@ public:
     }
 
     static void ReloadShaderDebugInformation();
+    static rdcstr GetMemoryAudit();
 
     static void GetReflections(rdcarray<const ShaderReflection *> &refls)
     {

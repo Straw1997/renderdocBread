@@ -390,6 +390,32 @@ selection unchanged.
 )");
   virtual void DisplayTextureAtEvent(uint32_t eventId, const TextureDisplay &config) = 0;
 
+  DOCUMENT(R"(Render and read back a bounded sequence of texture-history previews.
+
+The selected/current controller event and other replay outputs are preserved. Headless outputs may
+reuse an ascending ordinary replay sequence and restore the live event once for the batch. Other
+outputs retain the per-event fallback. At most 24 events are accepted per call.
+
+:param List[int] eventIds: Ordered events whose post-action texture state should be previewed.
+:param TextureDisplay config: Texture display configuration for every preview.
+:param KillCallback cancelled: Optional cancellation check between replay events.
+:return: A completed prefix of tightly packed RGB byte arrays. The call may yield early to bound
+  background queue occupancy; callers may submit the remaining events later.
+:rtype: List[bytes]
+)");
+  virtual rdcarray<bytebuf> ReadbackTextureAtEvents(const rdcarray<uint32_t> &eventIds,
+                                                    const TextureDisplay &config,
+                                                    RENDERDOC_KillCallback cancelled = {})
+  {
+    rdcarray<bytebuf> result;
+    if(eventIds.empty() || eventIds.size() > 24 || (cancelled && cancelled()))
+      return result;
+    // Non-native/complex-display fallbacks retain one-event foreground latency.
+    DisplayTextureAtEvent(eventIds.front(), config);
+    result.push_back(ReadbackOutputTexture());
+    return result;
+  }
+
   static const uint32_t NoResult = ~0U;
 
 protected:

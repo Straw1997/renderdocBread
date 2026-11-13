@@ -73,6 +73,9 @@ public:
 
   void Display();
   void DisplayTextureAtEvent(uint32_t eventId, const TextureDisplay &config);
+  rdcarray<bytebuf> ReadbackTextureAtEvents(const rdcarray<uint32_t> &eventIds,
+                                            const TextureDisplay &config,
+                                            RENDERDOC_KillCallback cancelled = {}) override;
 
   ReplayOutputType GetType() { return m_Type; }
   ResultDetails SetPixelContext(WindowingData window);

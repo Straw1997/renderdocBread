@@ -141,6 +141,7 @@ public:
   bool IsScrubbing() override { return m_Scrubbing; }
   void SetRemoteHost(int hostIndex);
   void RefreshStatus() override;
+  void CancelReplayBackgroundWork() override;
   void RefreshReplayStatus(uint32_t expectedEventId, uint64_t expectedBufferGeneration,
                            std::function<void(bool)> completed) override;
   bool IsResourceReplaced(ResourceId id) override;
@@ -486,6 +487,8 @@ private:
   // Unlike request generations, this changes only when normal navigation or close cancels a cycle.
   std::atomic<uint64_t> m_ScrubEpoch = {0};
   void QueueScrubReplay();
+  void InvokeAfterPresentation(uint32_t eventId, std::function<void()> completed,
+                               uint64_t scrubGeneration = 0);
   // One quiet-period request, cancelled by input/capture/publication changes. GPU replay itself
   // remains an atomic work unit; background queue priority does not imply GPU preemption.
   std::atomic<uint64_t> m_IdleCheckpointGeneration = {0};

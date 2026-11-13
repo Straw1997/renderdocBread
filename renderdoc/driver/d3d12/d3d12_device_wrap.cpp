@@ -32,6 +32,7 @@
 #include "replay/replay_timing.h"
 #include "d3d12_command_list.h"
 #include "d3d12_command_queue.h"
+#include "d3d12_commit_audit.inl"
 #include "d3d12_replay.h"
 #include "d3d12_resources.h"
 #include "d3d12_rootsig.h"
@@ -53,6 +54,7 @@ static RDResult DeferredPipelineCompile(ID3D12Device *device,
                                         const D3D12_GRAPHICS_PIPELINE_STATE_DESC &Descriptor,
                                         WrappedID3D12PipelineState *wrappedPipe)
 {
+  D3D12CommitAudit compileAudit("pipelineCompile", 0, 0, 0, GetResID(wrappedPipe));
   D3D12_GRAPHICS_PIPELINE_STATE_DESC unwrappedDesc = Descriptor;
   unwrappedDesc.pRootSignature = Unwrap(unwrappedDesc.pRootSignature);
 
@@ -112,6 +114,7 @@ static RDResult DeferredPipelineCompile(ID3D12Device *device,
                                         const D3D12_COMPUTE_PIPELINE_STATE_DESC &Descriptor,
                                         WrappedID3D12PipelineState *wrappedPipe)
 {
+  D3D12CommitAudit compileAudit("pipelineCompile", 0, 0, 0, GetResID(wrappedPipe));
   D3D12_COMPUTE_PIPELINE_STATE_DESC unwrappedDesc = Descriptor;
   unwrappedDesc.pRootSignature = Unwrap(unwrappedDesc.pRootSignature);
 
@@ -1530,6 +1533,21 @@ static bool ReplayDescriptorCopiesInOrder(const rdcarray<DynamicDescriptorCopy> 
   return true;
 }
 
+static void AuditReplayDescriptorWait(WrappedID3D12Device *device, const D3D12Descriptor &dst,
+                                      const D3D12Descriptor &src, double durationMS)
+{
+  if(Process::GetEnvVariable("RENDERDOC_D3D12_WAIT_AUDIT") != "1")
+    return;
+  AppendReplayTimingLog(StringFormat::Fmt(
+      "api=D3D12DescriptorWait rootEvent=%u dstHeap=%s dstIndex=%u srcHeap=%s srcIndex=%u "
+      "oldType=%u newType=%u logicalEqual=%u dstResource=%s srcResource=%s duration_ms=%.6f",
+      device->GetQueue()->GetCommandData()->m_RootEventID, ToStr(dst.GetHeapResourceId()).c_str(),
+      dst.GetHeapIndex(), ToStr(src.GetHeapResourceId()).c_str(), src.GetHeapIndex(),
+      (uint32_t)dst.GetType(), (uint32_t)src.GetType(), dst.ContentsEqual(src) ? 1U : 0U,
+      ToStr(dst.GetResResourceId()).c_str(), ToStr(src.GetResResourceId()).c_str(), durationMS));
+  device->AuditReplayDescriptorUsers(dst.GetHeapResourceId(), dst.GetHeapIndex());
+}
+
 template <typename SerialiserType>
 bool WrappedID3D12Device::Serialise_DynamicDescriptorWrite(SerialiserType &ser,
                                                            const DynamicDescriptorWrite *write)
@@ -1558,7 +1576,7 @@ bool WrappedID3D12Device::Serialise_DynamicDescriptorWrite(SerialiserType &ser,
       // are not serialised, so complete prior replay work before replacing their live contents.
       // RTV/DSV and other CPU-only descriptors are consumed while recording command lists.
       if((handle->GetHeap()->GetDesc().Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) &&
-         ReplayDescriptorMutationNeedsWait())
+         ReplayDescriptorSlotMutationNeedsWait(*handle, desc))
       {
         ScopedReplayTimingContext timingContext(ReplayTimingContext::DescriptorWrite);
         AddReplayTimingCounter(ReplayTimingCounter::DescriptorWriteWaits);
@@ -2003,6 +2021,8 @@ bool WrappedID3D12Device::Serialise_CreateHeap(SerialiserType &ser, const D3D12_
        Descriptor.Properties.Type == D3D12_HEAP_TYPE_CUSTOM)
       Descriptor.Properties.MemoryPoolPreference = D3D12_MEMORY_POOL_L0;
 
+    D3D12CommitAudit commitAudit("capturedHeap", Descriptor.SizeInBytes, Descriptor.Properties.Type,
+                                 0, pHeap);
     HRESULT hr = m_pDevice->CreateHeap(&Descriptor, guid, &realptr);
 
     ID3D12Heap *ret = NULL;
@@ -2372,61 +2392,114 @@ template <typename SerialiserType>
 bool WrappedID3D12Device::Serialise_DynamicDescriptorCopies(
     SerialiserType &ser, const rdcarray<DynamicDescriptorCopy> &DescriptorCopies)
 {
+  bool cacheRouting = false;
+  if(IsReplayingAndReading())
+    cacheRouting =
+        m_Queue && !ser.IsStructurising() && m_Queue->GetCommandData()->m_ActionCallback == NULL &&
+        (IsActiveReplaying(m_State)
+             ? m_ReplayDescriptorDecodeCacheAllowed
+             : (!ShouldUseConservativeReplaySync(true) &&
+                Process::GetEnvVariable("RENDERDOC_D3D12_DISABLE_DESCRIPTOR_DECODE_CACHE") != "1"));
+  const uint64_t offset = m_Queue ? m_Queue->GetCommandData()->m_CurChunkOffset : 0;
+  if(IsReplayingAndReading())
+  {
+    if(cacheRouting && IsActiveReplaying(m_State))
+    {
+      auto found = m_ReplayDescriptorCopyCache.find(offset);
+      if(found != m_ReplayDescriptorCopyCache.end())
+      {
+        m_ReplayDescriptorCopyCacheHits++;
+        // The frame stream is immutable and this complete chunk contains only DescriptorCopies.
+        // Execute every ordered copy against current live descriptor values, exactly as below.
+        ser.SkipCurrentChunk();
+        SERIALISE_CHECK_READ_ERRORS();
+        return ApplyReplayDescriptorCopies(found->second);
+      }
+      m_ReplayDescriptorCopyCacheMisses++;
+    }
+  }
   SERIALISE_ELEMENT(DescriptorCopies);
 
   SERIALISE_CHECK_READ_ERRORS();
 
   if(IsReplayingAndReading())
   {
-    const bool preserveOriginal = !ReplayDescriptorNoopEnabled(this);
-
-    // Keep the original disabled/validation/debug/conservative path and its pre-batch drain.
-    if(preserveOriginal)
+    static const uint64_t maxRoutingBytes = 64ULL * 1024 * 1024;
+    const uint64_t bytes = DescriptorCopies.size() * sizeof(DynamicDescriptorCopy);
+    if(cacheRouting && m_ReplayDescriptorCopyCache.size() < 16384 &&
+       bytes <= maxRoutingBytes - RDCMIN(maxRoutingBytes, m_ReplayDescriptorCopyCacheBytes) &&
+       m_ReplayDescriptorCopyCache.find(offset) == m_ReplayDescriptorCopyCache.end())
     {
-      for(const DynamicDescriptorCopy &copy : DescriptorCopies)
+      m_ReplayDescriptorCopyCache[offset] = DescriptorCopies;
+      m_ReplayDescriptorCopyCacheBytes += bytes;
+    }
+    return ApplyReplayDescriptorCopies(DescriptorCopies);
+  }
+  return true;
+}
+
+void WrappedID3D12Device::AuditReplayDescriptorDecodeCache()
+{
+  if(Process::GetEnvVariable("RENDERDOC_EID_TIMING") == "1")
+    AppendReplayTimingLog(StringFormat::Fmt(
+        "api=D3D12DescriptorDecodeCache entries=%zu bytes=%llu hits=%llu misses=%llu "
+        "proofEntries=%zu scope=captureTotals",
+        m_ReplayDescriptorCopyCache.size(), (unsigned long long)m_ReplayDescriptorCopyCacheBytes,
+        (unsigned long long)m_ReplayDescriptorCopyCacheHits,
+        (unsigned long long)m_ReplayDescriptorCopyCacheMisses, m_DescriptorWaitProofCache.size()));
+}
+
+bool WrappedID3D12Device::ApplyReplayDescriptorCopies(
+    const rdcarray<DynamicDescriptorCopy> &DescriptorCopies)
+{
+  const bool preserveOriginal = !ReplayDescriptorNoopEnabled(this);
+
+  // Keep the original disabled/validation/debug/conservative path and its pre-batch drain.
+  if(preserveOriginal)
+  {
+    for(const DynamicDescriptorCopy &copy : DescriptorCopies)
+    {
+      if((copy.dst->GetHeap()->GetDesc().Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) &&
+         ReplayDescriptorMutationNeedsWait())
       {
-        if((copy.dst->GetHeap()->GetDesc().Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) &&
-           ReplayDescriptorMutationNeedsWait())
+        ScopedReplayTimingContext timingContext(ReplayTimingContext::DescriptorCopy);
+        AddReplayTimingCounter(ReplayTimingCounter::DescriptorCopyWaits);
+        ReplayWorkWaitForIdle();
+        if(HasFatalError())
+          return false;
+        break;
+      }
+    }
+  }
+
+  return ReplayDescriptorCopiesInOrder(
+      DescriptorCopies,
+      [this, preserveOriginal](const DynamicDescriptorCopy &copy) {
+        return !preserveOriginal &&
+               CanSkipReplayDescriptorUpdate(GetResourceManager(), *copy.dst, *copy.src);
+      },
+      [this, preserveOriginal](const DynamicDescriptorCopy &copy) {
+        // Only a changed shader-visible destination requires waiting for prior consumers.
+        // Do not update its CPU mirror until after the wait succeeds.
+        if(!preserveOriginal &&
+           (copy.dst->GetHeap()->GetDesc().Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) &&
+           ReplayDescriptorSlotMutationNeedsWait(*copy.dst, *copy.src))
         {
           ScopedReplayTimingContext timingContext(ReplayTimingContext::DescriptorCopy);
           AddReplayTimingCounter(ReplayTimingCounter::DescriptorCopyWaits);
+          PerformanceTimer auditTimer;
           ReplayWorkWaitForIdle();
+          AuditReplayDescriptorWait(this, *copy.dst, *copy.src, auditTimer.GetMilliseconds());
           if(HasFatalError())
             return false;
-          break;
         }
-      }
-    }
 
-    return ReplayDescriptorCopiesInOrder(
-        DescriptorCopies,
-        [this, preserveOriginal](const DynamicDescriptorCopy &copy) {
-          return !preserveOriginal &&
-                 CanSkipReplayDescriptorUpdate(GetResourceManager(), *copy.dst, *copy.src);
-        },
-        [this, preserveOriginal](const DynamicDescriptorCopy &copy) {
-          // Only a changed shader-visible destination requires waiting for prior consumers.
-          // Do not update its CPU mirror until after the wait succeeds.
-          if(!preserveOriginal &&
-             (copy.dst->GetHeap()->GetDesc().Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) &&
-             ReplayDescriptorMutationNeedsWait())
-          {
-            ScopedReplayTimingContext timingContext(ReplayTimingContext::DescriptorCopy);
-            AddReplayTimingCounter(ReplayTimingCounter::DescriptorCopyWaits);
-            ReplayWorkWaitForIdle();
-            if(HasFatalError())
-              return false;
-          }
-
-          CopyDescriptorsSimple(1, *copy.dst, *copy.src, copy.type);
-          return true;
-        },
-        [](const DynamicDescriptorCopy &copy) {
-          copy.dst->GetHeap()->MarkMutableIndex(copy.dst->GetHeapIndex());
-        });
-  }
-
-  return true;
+        CopyDescriptorsSimple(1, *copy.dst, *copy.src, copy.type);
+        return true;
+      },
+      [](const DynamicDescriptorCopy &copy) {
+        copy.dst->GetHeap()->MarkMutableIndex(copy.dst->GetHeapIndex());
+      });
 }
 
 void WrappedID3D12Device::CopyDescriptors(

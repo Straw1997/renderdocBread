@@ -1072,6 +1072,8 @@ template <typename SerialiserType>
 bool WrappedVulkan::SerialiseUnmap(SerialiserType &ser, VkDeviceMemory memory, uint64_t MapOffset,
                                    uint64_t MapSize, byte *MapData)
 {
+  if(ReplayCachedHostWrite(ser, memory, MapOffset, MapSize))
+    return true;
   bool directStream = true;
 
   if(IsReplayingAndReading() && memory != VK_NULL_HANDLE)
@@ -1121,6 +1123,8 @@ bool WrappedVulkan::SerialiseUnmap(SerialiserType &ser, VkDeviceMemory memory, u
   {
     // not using SERIALISE_ELEMENT_ARRAY so we can deliberately avoid allocation - we serialise
     // directly into upload memory
+    if(IsReplayingAndReading() && memory != VK_NULL_HANDLE)
+      WaitForInitialRestoreHostWrite(memory, MapOffset, MapSize);
     ser.Serialise("MapData"_lit, MapData, MapSize, SerialiserFlags::NoFlags).Important();
   }
   else
@@ -1151,8 +1155,9 @@ bool WrappedVulkan::SerialiseUnmap(SerialiserType &ser, VkDeviceMemory memory, u
 
         // similarly, only copy up to the end of the region or the end ofthe map whichever is
         // *sooner*.
-        size_t size = size_t(RDCMIN(it->finish(), finish) - offs);
+        size_t size = size_t(RDCMIN(it->finish(), finish) - (MapOffset + offs));
 
+        WaitForInitialRestoreHostWrite(memory, MapOffset + offs, size);
         memcpy(MapData + offs, m_MaskedMapData.data() + offs, size);
       }
 
@@ -1502,10 +1507,20 @@ bool WrappedVulkan::Serialise_vkFlushMappedMemoryRanges(SerialiserType &ser, VkD
     }
   }
 
+  if(ReplayCachedHostWrite(ser, MemRange.memory, MemRange.offset, memRangeSize))
+  {
+    if(MappedData)
+      ObjDisp(device)->UnmapMemory(Unwrap(device), Unwrap(MemRange.memory));
+    SERIALISE_CHECK_READ_ERRORS();
+    return true;
+  }
+
   if(directStream)
   {
     // not using SERIALISE_ELEMENT_ARRAY so we can deliberately avoid allocation - we serialise
     // directly into upload memory
+    if(IsReplayingAndReading() && MemRange.memory != VK_NULL_HANDLE)
+      WaitForInitialRestoreHostWrite(MemRange.memory, MemRange.offset, memRangeSize);
     ser.Serialise("MapData"_lit, MappedData, memRangeSize, SerialiserFlags::NoFlags).Important();
   }
   else
@@ -1541,6 +1556,7 @@ bool WrappedVulkan::Serialise_vkFlushMappedMemoryRanges(SerialiserType &ser, VkD
         size_t offs = size_t(start - mappedRegionStart);
         size_t size = size_t(finish - start);
 
+        WaitForInitialRestoreHostWrite(MemRange.memory, start, size);
         memcpy(MappedData + offs, m_MaskedMapData.data() + offs, size);
       }
 

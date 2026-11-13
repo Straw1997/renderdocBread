@@ -120,6 +120,7 @@ private:
   bool showNode(bool usedSlot, bool filledSlot);
 
   bool m_ShowUnused = false;
+  uint64_t m_UpdateSerial = 0;
   bool m_ShowEmpty = false;
 
   QVariantList exportViewHTML(const Descriptor &descriptor, bool rw,

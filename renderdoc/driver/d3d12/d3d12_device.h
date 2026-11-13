@@ -766,6 +766,17 @@ private:
   // if we've called ReplayWorkWaitForIdle since the last replay or internal work
   bool m_WaitedForIdleAfterReplay = false;
   bool m_ReplayDescriptorWorkPending = false;
+  bool m_PreciseDescriptorWaitScope = false;
+  bool m_ReplayDescriptorDecodeCacheAllowed = true;
+  bool m_DescriptorWaitAudit = false;
+  // Capture metadata and original submission EIDs are immutable. Values contain only a proof
+  // result/reason, never native resource state. Mutation invalidation clears this bounded map.
+  std::map<rdcpair<ResourceId, uint64_t>, rdcpair<bool, const char *>> m_DescriptorWaitProofCache;
+  // Immutable copy routing, not descriptor contents. Heap wrappers live for the capture; native
+  // resource/heap replacement clears this map before any dependency can be released.
+  std::map<uint64_t, rdcarray<DynamicDescriptorCopy>> m_ReplayDescriptorCopyCache;
+  uint64_t m_ReplayDescriptorCopyCacheBytes = 0;
+  uint64_t m_ReplayDescriptorCopyCacheHits = 0, m_ReplayDescriptorCopyCacheMisses = 0;
 
   // list of queues and buffers kept alive during capture artificially even if the user destroys
   // them, so we can use them in the capture. Storing this separately prevents races where a
@@ -864,6 +875,7 @@ private:
   std::set<ResourceId> m_UploadResourceIds;
   std::set<ResourceId> m_ModResources;
   bool m_ReplayDirtyValid = false;
+  bool m_ShaderMutationWriteProofAllowed = false;
   bool m_ReplayDirtyRecordingAllowed = false;
   bool m_ReplayDirtyResetRequested = false;
   bool m_UseReplayDirtyInitialContents = false;
@@ -1043,6 +1055,9 @@ private:
   D3D12ReplayCheckpointCache *m_ReplayCheckpoints = NULL;
   bool m_UseCheckpointInitialSources = false;
   bool m_CheckpointDependenciesEdited = false;
+  // Content write tracking has a narrower contract than checkpoint/read-index reuse. A checked
+  // read-only PS changes no possible write destination, but still invalidates every old result.
+  bool m_ReplayDirtyDependenciesEdited = false;
   uint64_t m_CheckpointDescriptorPlanWork = 0;
 
   std::set<ResourceId> m_Cubemaps;
@@ -1329,6 +1344,7 @@ public:
   bool IsReadOnlyResource(ResourceId id) { return m_ModResources.find(id) == m_ModResources.end(); }
   void InvalidateReplayDirtyTracking(const char *reason);
   bool IsReplayDirtyTrackingValid() const { return m_ReplayDirtyValid; }
+  bool CanTrackCheckedShaderMutation() const { return m_ShaderMutationWriteProofAllowed; }
   void MarkReplayResourceDirty(ResourceId resource, bool unboundedRootUAV = false);
   void MarkReplayBufferRangeDirty(ResourceId resource, uint64_t offset, uint64_t length);
   void CacheReplayCPUWriteBaseline(uint64_t chunk, ResourceId resource, uint64_t offset,
@@ -1339,6 +1355,7 @@ public:
   void FilterReplayDirtyBufferCopyRanges(
       ResourceId resource, uint64_t byteCount, rdcarray<rdcpair<uint64_t, uint64_t>> &ranges);
   void MarkCheckpointReplayWrites();
+  rdcstr GetReplayUploadMemoryAudit();
   bool HasReplayCheckpointDependencyEdits() const { return m_CheckpointDependenciesEdited; }
   void MarkReplayFullOverwriteSubmitted(ResourceId resource);
   bool IsReplayInitialContentsUnchanged(ResourceId resource, uint64_t sourceBytes);
@@ -1421,11 +1438,14 @@ public:
   {
     return ShouldUseConservativeReplaySync() || m_ReplayDescriptorWorkPending;
   }
+  bool ReplayDescriptorSlotMutationNeedsWait(const D3D12Descriptor &dst,
+                                             const D3D12Descriptor &replacement);
   // Keep capture loading/validation conservative. Normal replay can queue the initial-state
   // transition and defer captured Signals' CPU waits to the resource mutation that needs them.
   bool ShouldUseConservativeReplaySync(bool allowLoading = false) const;
   // Retire immutable prepared command lists after a replay-visible resource/PSO mutation.
-  void InvalidatePreparedReplayCache();
+  void InvalidatePreparedReplayCache(bool readOnlyPixelShader = false,
+                                     bool readBoundsPreserved = false);
 
   RDCDriver GetFrameCaptureDriver() { return RDCDriver::D3D12; }
   void StartFrameCapture(DeviceOwnedWindow devWnd);
@@ -1449,12 +1469,16 @@ public:
   template <typename SerialiserType>
   bool Serialise_DynamicDescriptorCopies(SerialiserType &ser,
                                          const rdcarray<DynamicDescriptorCopy> &DescriptorCopies);
+  bool ApplyReplayDescriptorCopies(const rdcarray<DynamicDescriptorCopy> &copies);
+  void AuditReplayDescriptorDecodeCache();
+  void AuditReplayDescriptorUsers(ResourceId heap, uint32_t index);
 
   RDResult ReadLogInitialisation(RDCFile *rdc, bool storeStructuredBuffers);
   void ReplayLog(uint32_t startEventID, uint32_t endEventID, ReplayLogType replayType,
                  bool allowCheckpoints = false, bool knownShaderFeedback = false,
                  bool knownOrdinaryTarget = false, bool naturalReference = false,
-                 bool ordinaryRoot = false);
+                 bool ordinaryRoot = false, bool bufferMutationRoot = false,
+                 bool shaderMutationRoot = false);
   bool IsReplayCheckpointAliasingSafe(ResourceId before, ResourceId after,
                                       uint32_t boundaryEvent) const;
   void ConfigureReplayCheckpoints(const ReplayCheckpointConfig &config,

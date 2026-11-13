@@ -573,3 +573,69 @@ Native tests tagged `[shared-shader]` cover the replacement getter, cross-EID ow
 checked remote request validation and old-peer capability rejection. Build both client and server
 against the updated API. Existing protocol payloads remain compatible; an old peer without the
 new checked-replacement capability explicitly rejects this operation.
+
+## Bounded replay caches
+
+The ordinary replay path is authoritative. Optional reuse requires matching resource,
+mutation, event and command identities. Unsupported cases retain ordinary replay;
+these changes do not guarantee identical speedups for every API, driver or capture.
+
+- D3D12 forward continuation requires the previous successful ordinary final draw.
+  Shader replacement, resource edits, debugging and analysis invalidate or bypass it.
+- Backward replay and CBuffer edits may use proven upstream checkpoints. Automatic
+  policy starts with metadata, builds during idle, measures benefit, and evicts
+  unprofitable points. Default checkpoint storage is capped at 512 MiB.
+- CBuffer edits invalidate affected downstream results. Read-only ranges and
+  ExecuteIndirect arguments are bounded and typed; missing or conflicting evidence
+  selects full restoration. Repeated values may retain only unaffected upstream data.
+- Vulkan initial-image copies use immutable captured sources with exact subresource
+  coverage. Storage defaults to 768 MiB with a 256 MiB memory-budget headroom.
+  Missing budget support, allocation failure, sparse/external/multisampled images
+  and unsuitable formats retain the original upload path.
+- Vulkan decoded descriptor writes cache parameter decoding, not mutable descriptor
+  contents. Native writes/tracking still execute. The cache is capped at 4096
+  entries and 64 MiB and is invalidated at replay resource/edit boundaries.
+- GPU host-write sources are capped at 64 MiB/4096 entries. Aliased image hazards,
+  unsupported memory/queue topology, validation and debug callbacks retain the
+  original path. Multiple queues retain conservative synchronization.
+- Prepared D3D12 native command-list reuse remains explicitly opt-in; ordinary
+  command decoding and state continuation provide benefits independently.
+- Shader visual-debug caches own constant-block values and raw bytes, not borrowed
+  native ShaderReflection wrappers. Mutation/source/capture identities invalidate
+  cached plans and targets, and target count/bytes are bounded.
+- Visible thumbnails draw through native GPU outputs. Optional UI details are
+  deferred/coalesced. Diagnostic pixel witnesses deliberately read back pixels and
+  must be excluded from interaction timing.
+
+### Regression tools
+
+All audit inputs are explicit local developer captures, not distributed game data.
+Run only against a disposable runtime under this checkout's `output` directory.
+The harness owns its child process and isolated configuration/profile; it does not
+attach to an existing user application or overwrite an input RDC. Do not use
+repository-contained pytest temporary directories.
+
+`replay_audit_native_reuse.py --label LABEL --runtime RUNTIME --capture CAPTURE`
+exercises deterministic CBuffer edits/reset, compatible Shader replacements,
+debugging, historical output and the native editor save/error route. Add
+`--checkpoints` to require a real checkpoint hit and `--canonical-shader-replay`
+to compare a replacement with conservative replay.
+
+`replay_audit_ai_memory.py --label LABEL --runtime RUNTIME --capture CAPTURE`
+repeats compile/apply/debug/rollback and real IPC reflection reads. A small fixture
+may use `--skip-descriptor-scan --no-timing`; this excludes million-entry descriptor
+coverage and reports that limit. Check post-warmup private bytes/handles as well
+as `--unique-shader-variants` when measuring distinct compiled programs, as well
+as exact restoration on deterministic fixtures. A stable bounded run does not
+prove every capture and every future operation leak free.
+
+`silver_gpu_reuse_fixture.cpp` creates owned D3D12 test captures, including
+variable-count/zero-count indirect draws. It is a synthetic correctness fixture,
+not evidence for universal game speedups. `check_interactive_portable.sh` checks
+changed GUI translation units using a separately configured Linux build tree.
+
+Record complete input-to-presentation time with detailed tracing disabled.
+Compare controls on the same machine/binary/settings and report GPU contention.
+A per-stage timer moving earlier does not establish an end-to-end improvement.
+Game output can itself be nondeterministic; report repeated reference stability
+separately from cache-vs-reference differences.

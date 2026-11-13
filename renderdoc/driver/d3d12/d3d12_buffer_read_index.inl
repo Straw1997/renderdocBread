@@ -21,10 +21,52 @@ void D3D12CommandData::ObserveBufferPatchReads(BakedCmdListInfo &info, D3D12Chun
     }
     info.bufferPatchReadsComplete = false;
   };
-  const bool graphics = chunk == D3D12Chunk::List_DrawInstanced ||
-                        chunk == D3D12Chunk::List_DrawIndexedInstanced ||
-                        chunk == D3D12Chunk::List_DispatchMesh;
-  const bool compute = chunk == D3D12Chunk::List_Dispatch;
+  bool graphics = chunk == D3D12Chunk::List_DrawInstanced ||
+                  chunk == D3D12Chunk::List_DrawIndexedInstanced ||
+                  chunk == D3D12Chunk::List_DispatchMesh;
+  bool compute = chunk == D3D12Chunk::List_Dispatch;
+  const bool indirect = chunk == D3D12Chunk::List_ExecuteIndirect;
+  BakedCmdListInfo::BufferPatchReadOp read;
+  read.relativeEvent = relativeEvent;
+  if(indirect)
+  {
+    const uint32_t node = info.replayLastIndirectEvent;
+    if(node >= info.eventNodes.size() || !info.eventNodes[node].hasExecuteData ||
+       !info.eventNodes[node].executeData.sig)
+    {
+      fail("missingIndirectSignature");
+      return;
+    }
+    const auto &execute = info.eventNodes[node].executeData;
+    const auto &signature = execute.sig->sig;
+    if(!ReplayUAVDeclarationBindingsKnown(chunk, &signature) || node != relativeEvent)
+    {
+      fail("unsupportedIndirectSignature");
+      return;
+    }
+    const auto stages = ReplayWriteStages(chunk, &signature);
+    graphics = stages.graphics;
+    compute = stages.compute;
+    for(const auto &argument : signature.arguments)
+      if(argument.Type == D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW ||
+         argument.Type == D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW ||
+         argument.Type == D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW ||
+         argument.Type == D3D12_INDIRECT_ARGUMENT_TYPE_INDEX_BUFFER_VIEW)
+        read.generatedAddresses = true;
+    const uint64_t count = execute.maxCount;
+    const uint64_t stride = signature.ByteStride, packed = signature.PackedByteSize;
+    if(count && (execute.sourceArgs == ResourceId() || !stride || packed > stride ||
+                 count - 1 > (~0ULL - packed) / stride))
+    {
+      fail("invalidIndirectArgumentExtent");
+      return;
+    }
+    if(count)
+      read.direct.push_back(
+          {execute.sourceArgs, 0, execute.sourceArgsOffset, (count - 1) * stride + packed});
+    if(execute.sourceCount != ResourceId())
+      read.direct.push_back({execute.sourceCount, 0, execute.sourceCountOffset, 4});
+  }
   const bool copy = chunk == D3D12Chunk::List_CopyResource ||
                     chunk == D3D12Chunk::List_CopyBufferRegion ||
                     chunk == D3D12Chunk::List_CopyTextureRegion;
@@ -41,13 +83,13 @@ void D3D12CommandData::ObserveBufferPatchReads(BakedCmdListInfo &info, D3D12Chun
     fail("unsupportedNativeChunk");
     return;
   }
-  BakedCmdListInfo::BufferPatchReadOp read;
-  read.relativeEvent = relativeEvent;
   auto direct = [&](ResourceId id, uint64_t offset, uint64_t size) {
     if(id != ResourceId())
       read.direct.push_back({id, 0, offset, size});
   };
   const D3D12RenderState &state = info.state;
+  const ReplayPSOUAVProof *declarations =
+      (graphics != compute) ? &GetReplayPSOUAVProof(state.pipe) : NULL;
   direct(state.predication.buffer, state.predication.offset, 8);
   if(graphics)
   {
@@ -90,8 +132,23 @@ void D3D12CommandData::ObserveBufferPatchReads(BakedCmdListInfo &info, D3D12Chun
             (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_UAV && element.type == eRootUAV);
         if(!correctType)
           fail("rootDescriptorTypeMismatch");
+        else if(parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_CBV && declarations &&
+                declarations->complete && declarations->constantBuffersComplete)
+        {
+          uint64_t bytes = 0;
+          for(const auto &cb : declarations->constantBuffers)
+            if(cb.space == parameter.Descriptor.RegisterSpace &&
+               cb.first <= parameter.Descriptor.ShaderRegister &&
+               parameter.Descriptor.ShaderRegister - cb.first < cb.count &&
+               ReplayUAVVisibilityMatches(parameter.ShaderVisibility, cb.stage))
+              bytes = RDCMAX<uint64_t>(bytes, cb.byteSize);
+          // Bounds come from the original executable declaration, not an external debug blob.
+          // A root argument unused by every executable stage is not a buffer consumer.
+          if(bytes)
+            direct(element.id, element.offset, bytes);
+        }
         else
-          // Root descriptors don't carry a view size. The remaining allocation is a safe bound.
+          // Unknown declarations and root SRV/UAVs retain the whole remaining allocation.
           direct(element.id, element.offset, ~0ULL);
         continue;
       }
@@ -115,14 +172,13 @@ void D3D12CommandData::ObserveBufferPatchReads(BakedCmdListInfo &info, D3D12Chun
           fail("tableBaseOutOfRange");
           break;
         }
-        const uint64_t count = range.NumDescriptors == UINT_MAX ? capacity - element.offset - offset
-                                                                : range.NumDescriptors;
-        if(count > capacity - element.offset - offset)
-        {
-          fail("tableCountOutOfRange");
-          break;
-        }
-        previousEnd = offset + count;
+        const uint64_t remaining = capacity - element.offset - offset;
+        const uint64_t declared = range.NumDescriptors == UINT_MAX ? remaining : range.NumDescriptors;
+        // A declared array can overhang the bound heap when only an in-heap subset is used.
+        // Every legal read is within this intersection. Keep APPEND based on the declaration,
+        // not the clipped count; a later invalid table base still fails closed above.
+        const uint64_t count = RDCMIN(declared, remaining);
+        previousEnd = offset + declared;
         if(range.RangeType == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)
           continue;
         if(heap->GetDesc().Type != D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
@@ -207,8 +263,33 @@ bool D3D12CommandData::GetBufferPatchRangeConsumer(const std::map<ResourceId, ui
         fail("submittedSecondaryCommands");
         break;
       }
+    // Reject known incomplete command metadata before building potentially large descriptor
+    // histories. Previously the first edit paid hundreds of milliseconds before discovering a
+    // later list had already failed during loading. This removes work instead of deferring it.
     for(const auto &submission : m_Partial[Primary].cmdListExecs)
     {
+      if(!complete)
+        break;
+      if(submission.second.empty())
+        continue;
+      const auto found = m_BakedCmdListInfo.find(submission.first);
+      if(found == m_BakedCmdListInfo.end() || !found->second.bufferPatchReadsComplete)
+      {
+        failedList = submission.first;
+        if(found != m_BakedCmdListInfo.end())
+        {
+          failedEvent = found->second.bufferPatchReadFailureEvent;
+          failedChunk = found->second.bufferPatchReadFailureChunk;
+        }
+        fail(found == m_BakedCmdListInfo.end()         ? "missingSubmittedCommandList"
+             : found->second.bufferPatchReadFailure[0] ? found->second.bufferPatchReadFailure
+                                                       : "incompleteSubmittedCommandList");
+      }
+    }
+    for(const auto &submission : m_Partial[Primary].cmdListExecs)
+    {
+      if(!complete)
+        break;
       if(submission.second.empty())
         continue;
       const auto found = m_BakedCmdListInfo.find(submission.first);
@@ -282,6 +363,13 @@ bool D3D12CommandData::GetBufferPatchRangeConsumer(const std::map<ResourceId, ui
           }
           work--;
           const uint32_t event = base + read.relativeEvent;
+          // Generated GPU addresses may differ after a parameter edit. Cover every byte of
+          // each queried original buffer at this command, never just captured argument values.
+          // This conservative union remains useful for later reads while failing closed on
+          // unsupported root UAV/ray signatures above. It does not authorize indirect CBV edits.
+          if(read.generatedAddresses)
+            for(const auto &buffer : buffers)
+              add(event, buffer.first, 0, buffer.second);
           for(const auto &range : read.direct)
             add(event, range.resource, range.offset, range.size);
           for(const auto &table : read.tables)
@@ -347,7 +435,7 @@ TEST_CASE("D3D12 native read diagnostics preserve the first unresolved command",
   BakedCmdListInfo info;
   cmd.ObserveBufferPatchReads(info, D3D12Chunk::List_ExecuteIndirect, 7);
   CHECK_FALSE(info.bufferPatchReadsComplete);
-  CHECK(rdcstr(info.bufferPatchReadFailure) == "unsupportedNativeChunk");
+  CHECK(rdcstr(info.bufferPatchReadFailure) == "missingIndirectSignature");
   CHECK(info.bufferPatchReadFailureChunk == uint32_t(D3D12Chunk::List_ExecuteIndirect));
   CHECK(info.bufferPatchReadFailureEvent == 7);
   cmd.ObserveBufferPatchReads(info, D3D12Chunk::List_DrawInstanced, 9);
@@ -395,6 +483,17 @@ TEST_CASE("D3D12 byte consumers use submitted EIDs and preserve independent para
   CHECK(first == 14);
   REQUIRE(cmd.GetBufferPatchRangeConsumer({{buffer, 1024}}, {{buffer, 0, 4}}, first));
   CHECK(first == ~0U);
+  // An indirect GPU address is not frozen to the originally captured resource/offset. It
+  // conservatively consumes all queried bytes at that command, including a previously unused
+  // lane. Earlier independent direct reads still retain their own first-use boundary.
+  late.bufferPatchReads[0].generatedAddresses = true;
+  cmd.m_BufferPatchReadIndexPrepared = false;
+  REQUIRE(cmd.GetBufferPatchRangeConsumer({{buffer, 1024}}, {{buffer, 0, 4}}, first));
+  CHECK(first == 46);
+  REQUIRE(cmd.GetBufferPatchRangeConsumer({{buffer, 1024}}, {{buffer, 256, 4}}, first));
+  CHECK(first == 14);
+  late.bufferPatchReads[0].generatedAddresses = false;
+  cmd.m_BufferPatchReadIndexPrepared = false;
   // Invalid extents, unresolved commands, secondary executions and loading changes lose proof.
   CHECK_FALSE(cmd.GetBufferPatchRangeConsumer({{buffer, 600}}, {{buffer, 512, 4}}, first));
   late.bufferPatchReadsComplete = false;

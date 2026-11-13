@@ -284,6 +284,9 @@ void WrappedVulkan::ReplayQueueSubmit(VkQueue queue, VkSubmitInfo2 submitInfo, r
   m_HasSubmit = true;
 
   if(IsLoading(m_State))
+    m_ReplayCapturedQueues.insert(queue);
+  m_CapturedReplayWorkSubmitted = true;
+  if(IsLoading(m_State))
   {
     m_CheckpointSubmittedQueues.insert(GetResID(queue));
     AddEvent();
@@ -494,8 +497,7 @@ void WrappedVulkan::ReplayQueueSubmit(VkQueue queue, VkSubmitInfo2 submitInfo, r
 
         DoSubmit(queue, submitInfo);
       }
-      if(m_CheckpointSaveSubmissions && m_LastEventID >= completedEndEID &&
-         !rerecordedCmds.empty())
+      if(m_CheckpointSaveSubmissions && m_LastEventID >= completedEndEID && !rerecordedCmds.empty())
         SaveReplayCheckpoint(completedEndEID, eReplay_Full,
                              ReplayCheckpointKind::CompletedSubmission);
     }
@@ -1341,7 +1343,7 @@ bool WrappedVulkan::Serialise_vkQueueSubmit(SerialiserType &ser, VkQueue queue, 
       if(pSubmits[i].waitSemaphoreCount > 0)
         doWait = true;
 
-    if(doWait)
+    if(doWait && !(CanDeferInitialRestore() && !m_CapturedReplayWorkSubmitted && queue == m_Queue))
     {
       ScopedReplayTimingSection timing(ReplayTimingSection::ExplicitWait);
       ObjDisp(queue)->QueueWaitIdle(Unwrap(queue));

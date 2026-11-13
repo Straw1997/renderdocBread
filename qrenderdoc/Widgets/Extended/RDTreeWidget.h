@@ -336,6 +336,8 @@ private:
   ResourceLinkHandler m_ResourceLinkHandler;
 
   bool m_queueUpdates = false;
+  bool m_batchClear = false;
+  bool m_batchReset = false;
 
   RDTreeWidgetItem *m_queuedItem;
   QPair<int, int> m_lowestIndex;

@@ -34,6 +34,15 @@ ResourcePreview::ResourcePreview(ICaptureContext &c, IReplayOutput *output, QWid
 
   ui->thumbnail->SetContext(c);
   ui->thumbnail->SetOutput(output);
+  ui->thumbnail->SetAutomaticDisplay(false);
+  QObject::connect(ui->thumbnail, &CustomPaintWidget::displayRequested, this, [this]() {
+    // A valid resource/size cache is not a valid window surface after expose
+    // or scrolling. Flip-model backbuffers must be presented again.
+    m_NativePresentationSerial = 0;
+    emit resized(this);
+  });
+  QObject::connect(ui->thumbnail, &CustomPaintWidget::resize, this,
+                   [this](QResizeEvent *) { emit resized(this); });
 
   Initialise();
 }
@@ -58,6 +67,7 @@ ResourcePreview::ResourcePreview(bool, QWidget *parent)
 
 void ResourcePreview::Initialise()
 {
+  setAutoFillBackground(true);
   setBackgroundRole(QPalette::Background);
   setForegroundRole(QPalette::Foreground);
 
@@ -127,12 +137,14 @@ void ResourcePreview::doubleClickEvent(QMouseEvent *e)
 
 void ResourcePreview::setSlotName(const QString &n)
 {
-  ui->slotLabel->setText(n);
+  if(ui->slotLabel->text() != n)
+    ui->slotLabel->setText(n);
 }
 
 void ResourcePreview::setResourceName(const QString &n)
 {
-  ui->descriptionLabel->setText(n);
+  if(ui->descriptionLabel->text() != n)
+    ui->descriptionLabel->setText(n);
 }
 
 void ResourcePreview::setResourceLinkEnabled(bool enabled, const QString &toolTip)
@@ -153,6 +165,8 @@ void ResourcePreview::setResourceLinkEnabled(bool enabled, const QString &toolTi
 
 void ResourcePreview::setSize(QSize s)
 {
+  if(minimumSize() == s && maximumSize() == s)
+    return;
   setFixedWidth(s.width());
   setFixedHeight(s.height());
   setMinimumSize(s);
@@ -161,6 +175,8 @@ void ResourcePreview::setSize(QSize s)
 
 void ResourcePreview::setSelected(bool sel)
 {
+  if(m_Selected == sel)
+    return;
   m_Selected = sel;
 
   setForegroundRole(sel ? QPalette::Highlight : QPalette::Foreground);
@@ -202,6 +218,7 @@ void ResourcePreview::UpdateThumb(QSize s, const bytebuf &imgData)
 void ResourcePreview::ClearThumb()
 {
   ++m_ThumbRequestSerial;
+  m_NativePresentationSerial = 0;
   if(m_ManualThumbnail)
     m_ManualThumbnail->clear();
 }
@@ -210,4 +227,20 @@ void ResourcePreview::resizeEvent(QResizeEvent *e)
 {
   emit resized(this);
   QFrame::resizeEvent(e);
+}
+
+void ResourcePreview::RefreshNativeWindow()
+{
+  m_NativePresentationSerial = 0;
+  if(ui->thumbnail)
+    ui->thumbnail->update();
+  update();
+  emit resized(this);
+}
+
+void ResourcePreview::showEvent(QShowEvent *event)
+{
+  QFrame::showEvent(event);
+  m_NativePresentationSerial = 0;
+  emit resized(this);
 }

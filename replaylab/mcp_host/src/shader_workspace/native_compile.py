@@ -185,7 +185,9 @@ def compile_current(service, root, manifest, source, unit, *, manual_fast=False)
     directory = root / "revisions" / ("%04d" % revision)
     if directory.exists():
         raise ManifestValidationError("native compile revision already exists")
-    history = {"operation": "compile-native-source", "revision": revision, "nativeCompile": record}
+    history = {"operation": "compile-native-source", "revision": revision, "nativeCompile": record,
+               "routePlanSha256": (manifest.get("routePlan") or {}).get("planSha256"),
+               "outputSha256": hashlib.sha256(compiled).hexdigest()}
     published = False
     try:
         if not manual_fast and service._needs_dedicated_dxil_disassembly_evidence(manifest):

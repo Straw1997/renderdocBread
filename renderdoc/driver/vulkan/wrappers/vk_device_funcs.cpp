@@ -1050,6 +1050,7 @@ void WrappedVulkan::Shutdown()
     }
   }
 
+  ReleaseInitialUploadCache();
   FreeAllMemory(MemoryScope::InitialContents);
   FreeAllMemory(MemoryScope::InitialContentsFirstApplyOnly);
 

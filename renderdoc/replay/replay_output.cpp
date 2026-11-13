@@ -28,6 +28,7 @@
 #include "common/timing.h"
 #include "maths/formatpacking.h"
 #include "maths/matrix.h"
+#include "os/os_specific.h"
 #include "strings/string_utils.h"
 #include "replay_controller.h"
 #include "replay_timing.h"
@@ -308,6 +309,14 @@ void ReplayOutput::SetFrameEvent(int eventId)
   CHECK_REPLAY_THREAD();
 
   SetScrubFrameEvent(eventId);
+  static const bool eagerMesh =
+      Process::GetEnvVariable("RENDERDOC_REPLAY_EAGER_MESH_OUTPUTS") == "1";
+  // An empty or hidden mesh preview has no consumer for post-VS extraction. Preserve its dirty
+  // event state: DisplayMesh prepares the latest event when a visible, bound preview needs it.
+  if(!eagerMesh && m_Type == ReplayOutputType::Mesh &&
+     (m_RenderData.meshDisplay.position.vertexResourceId == ResourceId() ||
+      (m_MainOutput.outputID != 0 && !m_pDevice->IsOutputWindowVisible(m_MainOutput.outputID))))
+    return;
   RefreshOverlay();
 }
 
@@ -921,11 +930,106 @@ void ReplayOutput::DisplayContext()
   m_pController->FatalErrorCheck();
 }
 
+rdcarray<bytebuf> ReplayOutput::ReadbackTextureAtEvents(const rdcarray<uint32_t> &eventIds,
+                                                        const TextureDisplay &config,
+                                                        RENDERDOC_KillCallback cancelled)
+{
+  CHECK_REPLAY_THREAD();
+  if(eventIds.empty() || eventIds.size() > 24 || (cancelled && cancelled()))
+    return {};
+  bool ordinary = m_HeadlessWindow && config.customShaderId == ResourceId() &&
+                  config.overlay == DebugOverlay::NoOverlay && !config.decodeYUV &&
+                  std::is_sorted(eventIds.begin(), eventIds.end());
+  for(uint32_t event : eventIds)
+    ordinary &= !m_pController->HasEventOverrides(event);
+  if(!ordinary || Process::GetEnvVariable("RENDERDOC_DISABLE_HISTORY_BATCH") == "1")
+    return IReplayOutput::ReadbackTextureAtEvents(eventIds, config, cancelled);
+
+  PerformanceTimer timer;
+  double replayMS = 0.0, displayMS = 0.0;
+  double firstCompletedMS = 0.0;
+  const uint32_t savedEvent = m_EventID;
+  const TextureDisplay savedDisplay = m_RenderData.texDisplay;
+  const rdcpair<uint32_t, uint32_t> savedTextureDim = m_TextureDim;
+  const bool savedMaintenance = m_pController->m_IdleCheckpointMaintenance;
+  m_pController->m_IdleCheckpointMaintenance = true;
+  rdcarray<bytebuf> result;
+  bool replayed = false;
+  const bool forwardBatch = Process::GetEnvVariable("RENDERDOC_ENABLE_HISTORY_FORWARD_BATCH") == "1";
+  result.reserve(eventIds.size());
+  // Use the same analysis replay as DisplayTextureAtEvent, but restore the live selection once.
+  // Forward two-phase replay remains experimental: White's historical target has shown differing
+  // pixels versus the reference Full replay even where repeated reference images were stable.
+  for(uint32_t requested : eventIds)
+  {
+    if(cancelled && cancelled())
+      break;
+    if(result.size() >= 2 && timer.GetMilliseconds() - firstCompletedMS >= 100.0)
+      break;
+    const auto remap = m_pController->m_EventRemap.find(requested);
+    const uint32_t event = remap == m_pController->m_EventRemap.end() ? requested : remap->second;
+    const double start = timer.GetMilliseconds();
+    m_pController->InvalidateScrubReplay();
+    replayed = true;
+    if(forwardBatch)
+      m_pController->ReplayEvent(event, false, false, false);
+    else
+      m_pController->ReplayFrameEventForAnalysis(event);
+    replayMS += timer.GetMilliseconds() - start;
+    if(m_pController->m_FatalError != ResultCode::Succeeded)
+      break;
+    m_pController->m_MaterializedEventValid = false;
+    m_pController->m_AnalysisReplayState = ReplayController::AnalysisReplayState::Ready;
+    m_pController->m_AnalysisReplayEventID = event;
+    m_EventID = event;
+    SetTextureDisplayInternal(config, false);
+    m_OverlayDirty = false;
+    m_ForceOverlayRefresh = false;
+    const double drawStart = timer.GetMilliseconds();
+    if(m_pDevice->CheckResizeOutputWindow(m_MainOutput.outputID))
+      m_pDevice->GetOutputWindowDimensions(m_MainOutput.outputID, m_Width, m_Height);
+    DisplayTex();
+    m_pDevice->FlipOutputWindow(m_MainOutput.outputID);
+    m_pController->FatalErrorCheck();
+    if(m_pController->m_FatalError != ResultCode::Succeeded)
+      break;
+    result.push_back(ReadbackOutputTexture());
+    if(result.size() == 1)
+      firstCompletedMS = timer.GetMilliseconds();
+    displayMS += timer.GetMilliseconds() - drawStart;
+  }
+  const double restoreStart = timer.GetMilliseconds();
+  if(replayed && m_pController->m_FatalError == ResultCode::Succeeded)
+    m_pController->RestoreFrameEventAfterAnalysis();
+  m_pController->m_IdleCheckpointMaintenance = savedMaintenance;
+  m_EventID = savedEvent;
+  m_RenderData.texDisplay = savedDisplay;
+  m_OverlayDirty = m_CustomDirty = true;
+  m_ForceOverlayRefresh = false;
+  m_TextureDim = savedTextureDim;
+  m_MainOutput.dirty = true;
+  if(Process::GetEnvVariable("RENDERDOC_EID_TIMING") == "1")
+    AppendReplayTimingLog(
+        StringFormat::Fmt("api=TextureHistoryBatch requested=%zu completed=%zu replay_ms=%.3f "
+                          "displayReadback_ms=%.3f restore_ms=%.3f total_ms=%.3f",
+                          eventIds.size(), result.size(), replayMS, displayMS,
+                          timer.GetMilliseconds() - restoreStart, timer.GetMilliseconds()));
+  return result;
+}
+
 void ReplayOutput::Display()
 {
   CHECK_REPLAY_THREAD();
 
   RENDERDOC_PROFILEFUNCTION();
+
+  static const bool eagerMesh =
+      Process::GetEnvVariable("RENDERDOC_REPLAY_EAGER_MESH_OUTPUTS") == "1";
+  // Keep dirty state while hidden. Native/headless output windows report their own visibility;
+  // headless mesh rendering remains available and is not treated as a hidden GUI tab.
+  if(!eagerMesh && m_Type == ReplayOutputType::Mesh && m_MainOutput.outputID != 0 &&
+     !m_pDevice->IsOutputWindowVisible(m_MainOutput.outputID))
+    return;
 
   if(!m_pController->EnsureMaterializedCurrentEvent(__FUNCTION__))
     return;

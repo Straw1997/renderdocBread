@@ -62,6 +62,49 @@ def test_rhs_read_of_self_assignment_is_not_changed_to_after_assignment():
     assert "x = _bread_visual_capture(x) + 0.5" in result["source"]
 
 
+@pytest.mark.parametrize("nested", [False, True])
+def test_input_texcoord_arrays_pass_through_without_output_layout_rejection(nested):
+    inputs = "struct Input { float4 position : SV_Position; float4 uv[2] : TEXCOORD0; };"
+    if nested:
+        inputs += "\nstruct Outer { Input inner; };"
+    signature = "Outer input" if nested else "Input input"
+    path = "input.inner" if nested else "input"
+    source = inputs + "\nfloat4 main(" + signature + ") : SV_Target0 { float value = " + path + ".uv[1].x; return value; }"
+    generated = visual.instrument(selected(source, "value ="))
+    assert "float4 uv[2] : TEXCOORD0" in generated["source"]
+    assert signature in generated["source"]
+    assert path + ".position" in generated["source"]
+    assert "_bread_visual_capture(value)" in generated["source"]
+
+
+def test_output_array_rejection_is_preserved_separately_from_input_arrays():
+    source = "struct Output {float4 color[2] : SV_Target0;}; Output main() {float x=0.5;Output o=(Output)0;return o;}"
+    with pytest.raises(visual.VisualDebugError, match="output-array-layout-unsupported"):
+        visual.instrument(selected(source, "x=0.5"))
+
+
+def test_current_source_model_is_shared_but_each_expression_keeps_its_own_position(monkeypatch):
+    parsed = []
+    original_parse = visual._parse
+    def parse(source, language):
+        parsed.append(source)
+        return original_parse(source, language)
+    monkeypatch.setattr(visual, "_parse", parse)
+    source = "float4 main():SV_Target0 {float x=0.2;float y=x+0.3;return y;}"
+    prepared = visual.prepare_source(source)
+    plans = [visual.inspect(source, source.index(needle), prepared=prepared) for needle in ["x=", "y="]]
+    assert len(parsed) == 1
+    assert plans[0]["model"] is plans[1]["model"]
+    assert plans[0]["selection"]["expression"] == "x"
+    assert plans[1]["selection"]["expression"] == "y"
+    assert "_bread_visual_capture(x)" in visual.instrument(plans[0])["source"]
+    assert "_bread_visual_capture(y)" in visual.instrument(plans[1])["source"]
+    with pytest.raises(visual.VisualDebugError, match="stale-source-plan"):
+        visual.inspect(source.replace("0.2", "0.4"), source.index("x="), prepared=prepared)
+    with pytest.raises(visual.VisualDebugError, match="stale-source-plan"):
+        visual.inspect(source, source.index("x="), language="glsl", prepared=prepared)
+
+
 def test_lhs_assignment_observes_converted_assigned_value_once():
     source = "float4 main() : SV_Target0 { int x=2; x += 0.5; return x; }"
     result = visual.instrument(selected(source, "x +="))

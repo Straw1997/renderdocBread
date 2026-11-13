@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 from copy import deepcopy
 import hashlib
+import io
 from importlib.util import module_from_spec, spec_from_file_location
 import json
 import os
@@ -24,8 +25,37 @@ storage = module_from_spec(spec)
 spec.loader.exec_module(storage)
 
 
+@pytest.mark.parametrize("size", [37, 1024 * 1024 + 91])
+def test_bounded_preview_read_does_not_allocate_the_safety_ceiling(monkeypatch, size):
+    payload = b"x" * size
+    requests = []
+
+    class Reader(io.BytesIO):
+        def read(self, count=-1):
+            requests.append(count)
+            return super().read(count)
+
+    source = SimpleNamespace(is_file=lambda: True,
+                             stat=lambda: SimpleNamespace(st_size=size),
+                             open=lambda mode: Reader(payload))
+    monkeypatch.setattr(storage, "_ordinary", lambda path: source)
+    assert storage._bounded("preview", storage.MAX_OUTLINE) == payload
+    assert requests and 0 < max(requests) <= 1024 * 1024
+
+
+def test_bounded_read_still_rejects_a_file_growing_past_its_limit(monkeypatch):
+    maximum = 1024 * 1024 + 9
+    source = SimpleNamespace(is_file=lambda: True,
+                             stat=lambda: SimpleNamespace(st_size=1),
+                             open=lambda mode: io.BytesIO(b"x" * (maximum + 1)))
+    monkeypatch.setattr(storage, "_ordinary", lambda path: source)
+    with pytest.raises(ValueError, match="changed size"):
+        storage._bounded("growing", maximum)
+
+
 def write_rdc_container(path, frame=b"immutable frame payload", metadata=b"old edited shaders", thumbnail=b""):
     """Native 1.2 container layout; the synthetic frame body is not replayed."""
+    previous_mtime = path.stat().st_mtime_ns if path.exists() else 0
     def section(kind, name, payload):
         name = name.encode("utf-8") + b"\0"
         return struct.pack("<4sIQQQII", b"\0" * 4, kind, len(payload), len(payload), 1, 0, len(name)) + name + payload
@@ -35,7 +65,7 @@ def write_rdc_container(path, frame=b"immutable frame payload", metadata=b"old e
     path.write_bytes(data + section(1, "FrameCapture", frame) + section(9, "EditedShaders", metadata))
     # Guarantee a distinct stat key even on low-resolution Windows volumes.
     info = path.stat()
-    os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns + 1000000000))
+    os.utime(path, ns=(info.st_atime_ns, max(previous_mtime, info.st_mtime_ns) + 1000000000))
 
 
 @pytest.fixture
@@ -177,7 +207,9 @@ def test_frame_identity_is_cached_for_unchanged_stat_and_rechecked_after_metadat
     first["frameCaptureSha256"] = "caller-must-not-poison-cache"
     second = storage.capture_fingerprint(capture)
     assert len(calls) == 1 and second["frameCaptureSha256"] != first["frameCaptureSha256"]
+    previous_mtime = capture.stat().st_mtime_ns
     write_rdc_container(capture, metadata=b"new edited shaders")
+    assert capture.stat().st_mtime_ns != previous_mtime
     calls.clear()
     assert storage.capture_fingerprint(capture) == second and len(calls) == 1
 

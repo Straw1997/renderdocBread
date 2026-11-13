@@ -188,7 +188,7 @@ bool WrappedVulkan::Serialise_vkGetFenceStatus(SerialiserType &ser, VkDevice dev
 
   if(IsReplayingAndReading())
   {
-    ObjDisp(device)->DeviceWaitIdle(Unwrap(device));
+    WaitForCapturedFence(device);
   }
 
   return true;
@@ -293,7 +293,7 @@ bool WrappedVulkan::Serialise_vkWaitForFences(SerialiserType &ser, VkDevice devi
 
   if(IsReplayingAndReading())
   {
-    ObjDisp(device)->DeviceWaitIdle(Unwrap(device));
+    WaitForCapturedFence(device);
   }
 
   return true;

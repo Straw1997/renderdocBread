@@ -520,6 +520,7 @@ void D3D12PipelineStateViewer::OnCaptureLoaded()
 
 void D3D12PipelineStateViewer::OnCaptureClosed()
 {
+  ++m_UpdateSerial;
   setOldMeshPipeFlow();
 
   clearState();
@@ -527,8 +528,15 @@ void D3D12PipelineStateViewer::OnCaptureClosed()
 
 void D3D12PipelineStateViewer::OnEventChanged(uint32_t eventId)
 {
-  m_Ctx.Replay().AsyncInvoke([this](IReplayController *r) {
-    rdcarray<DescriptorAccess> access = m_Ctx.CurPipelineState().GetDescriptorAccess();
+  const uint64_t serial = ++m_UpdateSerial;
+  // i18n-ignore: internal completion evidence for isolated replay profiling.
+  setProperty("replayRequestedSerial", qulonglong(serial));
+  // Snapshot GUI-owned publication before queuing work; a later EID/edit may publish meanwhile.
+  const rdcarray<DescriptorAccess> access = m_Ctx.CurPipelineState().GetDescriptorAccess();
+  QPointer<D3D12PipelineStateViewer> self(this);
+  m_Ctx.Replay().AsyncInvoke([self, eventId, serial, access](IReplayController *r) {
+    if(!self || r->GetCurrentEventID() != eventId)
+      return;
 
     ResourceId descriptorStore;
     rdcarray<DescriptorRange> ranges;
@@ -563,15 +571,22 @@ void D3D12PipelineStateViewer::OnEventChanged(uint32_t eventId)
       locations.append(r->GetDescriptorLocations(descriptorStore, ranges));
 
     // we only write to m_Locations etc on the GUI thread so we know there's no race here.
-    GUIInvoke::call(this, [this, access = std::move(access), locations = std::move(locations)]() {
-      m_Locations.clear();
+    GUIInvoke::call(qApp, [self, eventId, serial, access, locations = std::move(locations)]() {
+      if(!self || serial != self->m_UpdateSerial || !self->m_Ctx.IsCaptureLoaded() ||
+         self->m_Ctx.CurEvent() != eventId)
+        return;
+      self->m_Locations.clear();
 
       for(size_t i = 0; i < qMin(access.size(), locations.size()); i++)
       {
-        m_Locations[{access[i].descriptorStore, access[i].byteOffset}] = locations[i];
+        self->m_Locations[{access[i].descriptorStore, access[i].byteOffset}] = locations[i];
       }
 
-      setState();
+      self->setState();
+      // i18n-ignore: internal completion evidence, never a UI label.
+      self->setProperty("replayDisplayedEvent", eventId);
+      // i18n-ignore: internal completion evidence, never a UI label.
+      self->setProperty("replayDisplayedSerial", qulonglong(serial));
     });
   });
 }

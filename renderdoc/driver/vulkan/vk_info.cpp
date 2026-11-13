@@ -32,6 +32,15 @@ RDOC_EXTERN_CONFIG(rdcarray<rdcstr>, DXBC_Debug_SearchDirPaths);
 
 ResourceId VulkanCreationInfo::pushConstantDescriptorStorage;
 rdcarray<ResourceId> VulkanCreationInfo::descriptorSetStorage;
+
+template <>
+void Deserialise(const DescUpdateTemplateApplication &application)
+{
+  // rdcarray destroys the flat VkWriteDescriptorSet structs, but their deserialised pointer
+  // arrays and extension chains need the Vulkan-specific deep cleanup as well.
+  for(const VkWriteDescriptorSet &write : application.writes)
+    Deserialise(write);
+}
 rdcarray<ResourceId> VulkanCreationInfo::descriptorBufferStorage;
 rdcarray<ResourceId> VulkanCreationInfo::inlineBufferStorage;
 

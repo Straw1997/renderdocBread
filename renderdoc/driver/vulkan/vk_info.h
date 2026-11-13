@@ -166,6 +166,8 @@ struct DescUpdateTemplateApplication
   rdcarray<VkWriteDescriptorSet> writes;
 };
 
+DECLARE_DESERIALISE_TYPE(DescUpdateTemplateApplication);
+
 struct DescUpdateTemplate
 {
   void Init(VulkanResourceManager *resourceMan, VulkanCreationInfo &info,

@@ -24,10 +24,10 @@
  ******************************************************************************/
 
 #include "replay_controller.h"
-#include <algorithm>
-#include <atomic>
 #include <string.h>
 #include <time.h>
+#include <algorithm>
+#include <atomic>
 #include <unordered_set>
 #include "common/dds_readwrite.h"
 #include "common/timing.h"
@@ -63,13 +63,18 @@ static uint64_t NextRenderOutputMutationGeneration()
 struct ScopedCheckpointAnalysisBypass
 {
   explicit ScopedCheckpointAnalysisBypass(IReplayDriver *&driver)
-      : device(driver), previous(driver->m_ReplayCheckpointBypass),
+      : device(driver),
+        previous(driver->m_ReplayCheckpointBypass),
         previousNaturalReference(driver->m_ReplayCheckpointNaturalReference),
-        previousPrefixOnly(driver->m_ReplayCheckpointPrefixOnly)
+        previousPrefixOnly(driver->m_ReplayCheckpointPrefixOnly),
+        previousBufferMutation(driver->m_ReplayBufferMutationRoot),
+        previousShaderMutation(driver->m_ReplayShaderMutationRoot)
   {
     device->m_ReplayCheckpointBypass = true;
     device->m_ReplayCheckpointNaturalReference = false;
     device->m_ReplayCheckpointPrefixOnly = false;
+    device->m_ReplayBufferMutationRoot = false;
+    device->m_ReplayShaderMutationRoot = false;
   }
   ~ScopedCheckpointAnalysisBypass()
   {
@@ -77,11 +82,27 @@ struct ScopedCheckpointAnalysisBypass
     device->m_ReplayCheckpointBypass = previous;
     device->m_ReplayCheckpointNaturalReference = previousNaturalReference;
     device->m_ReplayCheckpointPrefixOnly = previousPrefixOnly;
+    device->m_ReplayBufferMutationRoot = previousBufferMutation;
+    device->m_ReplayShaderMutationRoot = previousShaderMutation;
   }
   IReplayDriver *&device;
   bool previous;
   bool previousNaturalReference;
   bool previousPrefixOnly;
+  bool previousBufferMutation;
+  bool previousShaderMutation;
+};
+
+struct ScopedCheckedShaderReplay
+{
+  explicit ScopedCheckedShaderReplay(IReplayDriver *&driver)
+      : device(driver), previous(driver->m_ReplayShaderMutationRoot)
+  {
+    device->m_ReplayShaderMutationRoot = true;
+  }
+  ~ScopedCheckedShaderReplay() { device->m_ReplayShaderMutationRoot = previous; }
+  IReplayDriver *&device;
+  bool previous;
 };
 
 struct ScopedCheckpointPrefixOnly
@@ -103,14 +124,25 @@ struct ScopedCheckpointPrefixOnly
 struct ScopedSharedBufferPatchReplay
 {
   ScopedSharedBufferPatchReplay(IReplayDriver *&driver, bool &sharedReplay)
-      : prefix(driver, true), replay(sharedReplay), previous(sharedReplay)
+      : prefix(driver, true),
+        replay(sharedReplay),
+        previous(sharedReplay),
+        device(driver),
+        previousBufferMutation(driver->m_ReplayBufferMutationRoot)
   {
     replay = true;
+    device->m_ReplayBufferMutationRoot = true;
   }
-  ~ScopedSharedBufferPatchReplay() { replay = previous; }
+  ~ScopedSharedBufferPatchReplay()
+  {
+    replay = previous;
+    device->m_ReplayBufferMutationRoot = previousBufferMutation;
+  }
   ScopedCheckpointPrefixOnly prefix;
   bool &replay;
   bool previous;
+  IReplayDriver *&device;
+  bool previousBufferMutation;
 };
 
 ReplayController::ReplayController()
@@ -150,8 +182,8 @@ void ReplayController::SetFrameEvent(uint32_t eventId, bool force)
     m_EventID = eventId;
     const bool previousBypass = m_pDevice->m_ReplayCheckpointBypass;
     const bool previousReference = m_pDevice->m_ReplayCheckpointNaturalReference;
-    ScopedCheckpointPrefixOnly prefix(
-        m_pDevice, force ? false : m_pDevice->m_ReplayCheckpointPrefixOnly);
+    ScopedCheckpointPrefixOnly prefix(m_pDevice,
+                                      force ? false : m_pDevice->m_ReplayCheckpointPrefixOnly);
     m_pDevice->m_ReplayCheckpointBypass = previousBypass || force;
     if(force)
       m_pDevice->m_ReplayCheckpointNaturalReference = false;
@@ -266,10 +298,10 @@ bool ReplayController::EnsureMaterializedCurrentEvent(const char *reason)
   const bool materialized = m_MaterializedEventValid && m_MaterializedEventID == m_EventID;
   if(timing)
   {
-    const rdcstr line = StringFormat::Fmt(
-        "api=MaterializeEvent eid=%u previous=%u reason=%s total_ms=%.3f ok=%u", m_EventID,
-        previousMaterializedEvent, reason ? reason : "unspecified", timer.GetMilliseconds(),
-        materialized ? 1U : 0U);
+    const rdcstr line =
+        StringFormat::Fmt("api=MaterializeEvent eid=%u previous=%u reason=%s total_ms=%.3f ok=%u",
+                          m_EventID, previousMaterializedEvent, reason ? reason : "unspecified",
+                          timer.GetMilliseconds(), materialized ? 1U : 0U);
     RDCLOG("[EIDTiming] %s", line.c_str());
     AppendReplayTimingLog(line);
   }
@@ -301,8 +333,8 @@ bool ReplayController::EnsureExplicitResourceRead(const char *reason)
 double ReplayController::ReplayDriverBoundary(uint32_t eventId, ReplayLogType replayType)
 {
   const bool timing = EIDTimingEnabled();
-  const bool prefixOnly = m_pDevice->m_ReplayCheckpointPrefixOnly &&
-                          !m_pDevice->m_ReplayCheckpointBypass;
+  const bool prefixOnly =
+      m_pDevice->m_ReplayCheckpointPrefixOnly && !m_pDevice->m_ReplayCheckpointBypass;
   if(!timing && !m_CheckpointAutomatic)
   {
     m_pDevice->ReplayLog(eventId, replayType);
@@ -315,12 +347,12 @@ double ReplayController::ReplayDriverBoundary(uint32_t eventId, ReplayLogType re
     return elapsed;
   const char *type = replayType == eReplay_Full          ? "Full"
                      : replayType == eReplay_WithoutDraw ? "WithoutDraw"
-                                                        : "OnlyDraw";
+                                                         : "OnlyDraw";
   // This outer wall-time scope includes driver epilogues/feedback beyond the native ReplayLog
   // scope. It is independent diagnostic evidence and must not be added to that nested scope.
-  const rdcstr line = StringFormat::Fmt(
-      "api=ReplayDriverBoundary type=%s eid=%u total_ms=%.3f prefix_only=%u",
-      type, eventId, elapsed, prefixOnly ? 1U : 0U);
+  const rdcstr line =
+      StringFormat::Fmt("api=ReplayDriverBoundary type=%s eid=%u total_ms=%.3f prefix_only=%u",
+                        type, eventId, elapsed, prefixOnly ? 1U : 0U);
   RDCLOG("[EIDTiming] %s", line.c_str());
   AppendReplayTimingLog(line);
   return elapsed;
@@ -358,9 +390,9 @@ void ReplayController::CommitScrubFrameEvent(uint32_t eventId)
 
   if(timing)
   {
-    const rdcstr line = StringFormat::Fmt(
-        "api=ScrubCommit eid=%u pipeline_ms=%.3f replay_ms=%.3f", eventId,
-        timer.GetMilliseconds() - replayMS, canCommitWithoutReplay ? 0.0 : replayMS);
+    const rdcstr line = StringFormat::Fmt("api=ScrubCommit eid=%u pipeline_ms=%.3f replay_ms=%.3f",
+                                          eventId, timer.GetMilliseconds() - replayMS,
+                                          canCommitWithoutReplay ? 0.0 : replayMS);
     RDCLOG("[EIDTiming] %s", line.c_str());
     AppendReplayTimingLog(line);
   }
@@ -449,9 +481,9 @@ rdcstr ValidateShaderPairSnapshots(const ShaderPairComparison &result)
   for(const ShaderPairSnapshot &output : result.outputs)
   {
     if(output.resourceId == ResourceId() || output.width == 0 || output.height == 0 ||
-       output.width > 8192 || output.height > 8192 ||
-       output.subresource.mip != 0 || output.subresource.slice != 0 ||
-       output.subresource.sample != 0 || (output.depth ? output.index != 0 : output.index >= 8) ||
+       output.width > 8192 || output.height > 8192 || output.subresource.mip != 0 ||
+       output.subresource.slice != 0 || output.subresource.sample != 0 ||
+       (output.depth ? output.index != 0 : output.index >= 8) ||
        !slots.insert({output.depth, output.index}).second)
       return "Single-prefix comparison returned an invalid output identity or subresource";
     if(output.baseline.empty() || output.baseline.size() > 32ULL * 1024 * 1024 ||
@@ -509,7 +541,8 @@ ShaderPairComparison ReplayController::ComparePixelShaderPair(uint32_t eventId,
   if(HasEventOverrides(eventId) ||
      m_GlobalShaderReplacements.find(expectedOriginal) != m_GlobalShaderReplacements.end())
   {
-    result.reason = "Single-prefix comparison requires the original draw without Shader or CBuffer overrides";
+    result.reason =
+        "Single-prefix comparison requires the original draw without Shader or CBuffer overrides";
     return result;
   }
 
@@ -530,8 +563,8 @@ ShaderPairComparison ReplayController::ComparePixelShaderPair(uint32_t eventId,
   if(result.completed)
   {
     const rdcstr error = result.eventId != eventId
-                            ? rdcstr("Single-prefix comparison returned a different event")
-                            : ValidateShaderPairSnapshots(result);
+                             ? rdcstr("Single-prefix comparison returned a different event")
+                             : ValidateShaderPairSnapshots(result);
     if(error.empty())
       m_AnalysisReplayState = AnalysisReplayState::Ready;
     else
@@ -673,6 +706,11 @@ void ReplayController::ReplayEvent(uint32_t eventId, bool updateOutputs, bool fe
 
   // Be defensive if an analysis caller exits early without its documented restore call.
   RestoreAnalysisEventOverrides();
+  // A forward visit may continue the already materialized native state. Do not turn it into
+  // a full-prefix replay merely to collect checkpoint cost evidence: it is a different path,
+  // and its cheap result is not a comparable checkpoint/reference timing sample either.
+  const bool forwardFromMaterialized =
+      m_MaterializedEventValid && eventId > m_MaterializedEventID && !m_SharedBufferPatchReplay;
   m_MaterializedEventValid = false;
   m_PipelineStateValid = false;
 
@@ -701,9 +739,12 @@ void ReplayController::ReplayEvent(uint32_t eventId, bool updateOutputs, bool fe
     return;
   }
 
-  const AutomaticCheckpointRequest checkpointRequest = BeginAutomaticCheckpointRequest(
-      eventId, (updateOutputs ? 1U : 0U) | (fetchPipelineState ? 2U : 0U) |
-                   (m_SharedBufferPatchReplay ? 4U : 0U));
+  const AutomaticCheckpointRequest checkpointRequest =
+      forwardFromMaterialized
+          ? AutomaticCheckpointRequest()
+          : BeginAutomaticCheckpointRequest(eventId, (updateOutputs ? 1U : 0U) |
+                                                         (fetchPipelineState ? 2U : 0U) |
+                                                         (m_SharedBufferPatchReplay ? 4U : 0U));
   double driverMS = ReplayDriverBoundary(eventId, eReplay_WithoutDraw);
   FatalErrorCheck();
 
@@ -760,14 +801,13 @@ void ReplayController::ReplayEvent(uint32_t eventId, bool updateOutputs, bool fe
     FetchPipelineState(eventId);
 
   if(timing)
-    RDCLOG("[EIDTiming] settle EID %u: replay(2-pass)+outputs %.2fms, pipelineState %.2fms", eventId,
-           replayMS, fetchPipelineState ? eidTimer.GetMilliseconds() - replayMS : 0.0);
+    RDCLOG("[EIDTiming] settle EID %u: replay(2-pass)+outputs %.2fms, pipelineState %.2fms",
+           eventId, replayMS, fetchPipelineState ? eidTimer.GetMilliseconds() - replayMS : 0.0);
 }
 
 rdcstr ReplayController::SetEventShaderOverride(uint32_t eventId, ShaderStage stage,
-                                                ResourceId expectedOriginal,
-                                                ResourceId replacement, uint32_t outputTarget,
-                                                bool independentFloatOutput)
+                                                ResourceId expectedOriginal, ResourceId replacement,
+                                                uint32_t outputTarget, bool independentFloatOutput)
 {
   CHECK_REPLAY_THREAD();
   EndAnalysisForMutation();
@@ -805,9 +845,8 @@ rdcstr ReplayController::SetEventShaderOverride(uint32_t eventId, ShaderStage st
   if(hadPrior)
     prior = priorIt->second;
 
-  rdcstr error =
-      m_pDevice->SetEventShaderOverride(eventId, stage, expectedOriginal, replacement, outputTarget,
-                                       independentFloatOutput);
+  rdcstr error = m_pDevice->SetEventShaderOverride(eventId, stage, expectedOriginal, replacement,
+                                                   outputTarget, independentFloatOutput);
   FatalErrorCheck();
 
   if(m_FatalError != ResultCode::Succeeded)
@@ -845,9 +884,9 @@ rdcstr ReplayController::SetEventShaderOverride(uint32_t eventId, ShaderStage st
       bool restoredPrior = false;
       if(hadPrior)
       {
-        rdcstr restoreError = m_pDevice->SetEventShaderOverride(
-            eventId, stage, prior.original, prior.replacement, prior.outputTarget,
-            prior.independentFloatOutput);
+        rdcstr restoreError =
+            m_pDevice->SetEventShaderOverride(eventId, stage, prior.original, prior.replacement,
+                                              prior.outputTarget, prior.independentFloatOutput);
         FatalErrorCheck();
         if(m_FatalError != ResultCode::Succeeded)
           return fatalMessage();
@@ -884,7 +923,6 @@ rdcstr ReplayController::SetEventShaderOverride(uint32_t eventId, ShaderStage st
       }
       return applyError;
     }
-
   }
 
   // The selected event generation was published before replay and before presenting outputs.
@@ -942,8 +980,7 @@ void ReplayController::ClearEventShaderOverride(uint32_t eventId, ShaderStage st
   if(remapIt != m_EventRemap.end())
     eventId = remapIt->second;
 
-  const auto replacementIt =
-      m_EventShaderReplacements.find(std::make_pair(eventId, stage));
+  const auto replacementIt = m_EventShaderReplacements.find(std::make_pair(eventId, stage));
   const bool changed = replacementIt != m_EventShaderReplacements.end();
 
   m_pDevice->ClearEventShaderOverride(eventId, stage);
@@ -999,10 +1036,11 @@ void ReplayController::ClearEventShaderOverrides()
       m_Outputs[i]->Display();
 }
 
-rdcstr ReplayController::SetEventCBufferOverride(
-    uint32_t eventId, ShaderStage stage, uint32_t slot, ResourceId expectedShader,
-    ResourceId expectedBuffer, uint64_t expectedByteOffset, uint64_t expectedByteSize, bytebuf data,
-    uint32_t registerSpace)
+rdcstr ReplayController::SetEventCBufferOverride(uint32_t eventId, ShaderStage stage, uint32_t slot,
+                                                 ResourceId expectedShader, ResourceId expectedBuffer,
+                                                 uint64_t expectedByteOffset,
+                                                 uint64_t expectedByteSize, bytebuf data,
+                                                 uint32_t registerSpace)
 {
   CHECK_REPLAY_THREAD();
   EndAnalysisForMutation();
@@ -1013,8 +1051,7 @@ rdcstr ReplayController::SetEventCBufferOverride(
   if(m_pDevice->IsRemoteProxy())
     return "Event-scoped constant-buffer overrides require a local replay driver";
 
-  if(m_APIProps.pipelineType != GraphicsAPI::D3D11 &&
-     m_APIProps.pipelineType != GraphicsAPI::D3D12)
+  if(m_APIProps.pipelineType != GraphicsAPI::D3D11 && m_APIProps.pipelineType != GraphicsAPI::D3D12)
     return "Event-scoped constant-buffer overrides currently support D3D11 and D3D12 captures";
 
   const uint32_t d3d11CBufferSlotCount = 14;
@@ -1067,9 +1104,9 @@ rdcstr ReplayController::SetEventCBufferOverride(
   if(!EnsureMaterializedCurrentEvent(__FUNCTION__))
     return "Failed to replay the current event before configuring a constant-buffer override";
 
-  rdcstr error = m_pDevice->SetEventCBufferOverride(
-      eventId, stage, slot, expectedShader, expectedBuffer, expectedByteOffset, expectedByteSize, data,
-      registerSpace);
+  rdcstr error =
+      m_pDevice->SetEventCBufferOverride(eventId, stage, slot, expectedShader, expectedBuffer,
+                                         expectedByteOffset, expectedByteSize, data, registerSpace);
   FatalErrorCheck();
 
   if(!error.empty())
@@ -1110,8 +1147,7 @@ void ReplayController::ClearEventCBufferOverride(uint32_t eventId, ShaderStage s
   EndAnalysisForMutation();
 
   if(m_pDevice == NULL || m_pDevice->IsRemoteProxy() ||
-     (m_APIProps.pipelineType != GraphicsAPI::D3D11 &&
-      m_APIProps.pipelineType != GraphicsAPI::D3D12))
+     (m_APIProps.pipelineType != GraphicsAPI::D3D11 && m_APIProps.pipelineType != GraphicsAPI::D3D12))
     return;
 
   auto remapIt = m_EventRemap.find(eventId);
@@ -1119,8 +1155,7 @@ void ReplayController::ClearEventCBufferOverride(uint32_t eventId, ShaderStage s
     eventId = remapIt->second;
 
   m_pDevice->ClearEventCBufferOverride(eventId, stage, slot, registerSpace);
-  const bool changed =
-      m_EventCBufferOverrides.erase({eventId, stage, slot, registerSpace}) != 0;
+  const bool changed = m_EventCBufferOverrides.erase({eventId, stage, slot, registerSpace}) != 0;
   if(changed)
     MarkEventShaderReplacementChanged(eventId);
 
@@ -1140,8 +1175,7 @@ void ReplayController::ClearEventCBufferOverrides()
   EndAnalysisForMutation();
 
   if(m_pDevice == NULL || m_pDevice->IsRemoteProxy() ||
-     (m_APIProps.pipelineType != GraphicsAPI::D3D11 &&
-      m_APIProps.pipelineType != GraphicsAPI::D3D12))
+     (m_APIProps.pipelineType != GraphicsAPI::D3D11 && m_APIProps.pipelineType != GraphicsAPI::D3D12))
     return;
 
   std::set<uint32_t> affectedEvents;
@@ -1192,7 +1226,7 @@ rdcstr ReplayController::ClearSharedBufferPatches()
 }
 
 rdcstr ReplayController::ResetSharedBufferRange(ResourceId buffer, uint64_t byteOffset,
-                                               uint64_t byteLength)
+                                                uint64_t byteLength)
 {
   CHECK_REPLAY_THREAD();
   if(buffer == ResourceId() || byteLength == 0 || byteOffset > UINT64_MAX - byteLength)
@@ -1223,8 +1257,8 @@ rdcstr ReplayController::CommitSharedBufferPatches(const ReplayBufferPatchSet &p
   const bool deltaKnown = GetReplayBufferPatchChanges(previous, next, changes).empty();
   bool changed = next.size() != previous.size();
   for(size_t i = 0; !changed && i < next.size(); i++)
-    changed = next[i].buffer != previous[i].buffer || next[i].byteOffset != previous[i].byteOffset ||
-              next[i].data != previous[i].data;
+    changed = next[i].buffer != previous[i].buffer ||
+              next[i].byteOffset != previous[i].byteOffset || next[i].data != previous[i].data;
   if(!changed || (deltaKnown && changes.empty()))
   {
     // Hidden layers still matter to later undo, even if the current native bytes are identical.
@@ -1253,6 +1287,8 @@ rdcstr ReplayController::CommitSharedBufferPatches(const ReplayBufferPatchSet &p
   // change has no valid consumer cutoff, so its following forced replay cannot train the policy.
   if(firstAffected == 0)
     ResetAutomaticCheckpointCosts(0);
+  else if(previous.empty())
+    ResetAutomaticCheckpointCosts(firstAffected);
   // Display/history generations still change globally: even a preserved prefix can expose the
   // patched buffer directly. The driver's complete consumer index independently proves which
   // upstream render-state checkpoints remain reusable. Shader replacements keep their separate
@@ -1283,9 +1319,9 @@ rdcstr ReplayController::CommitSharedBufferPatches(const ReplayBufferPatchSet &p
         "api=ReplayController op=shared_buffer_patch event=%u ranges=%zu bytes=%llu "
         "first_affected_event=%u generation=%llu backend_commit_ms=%.3f replay_ms=%.3f "
         "display_ms=%.3f total_ms=%.3f delta_known=%u changed_ranges=%zu changed_bytes=%llu",
-        m_EventID, next.size(), bytes, firstAffected,
-        m_SharedBufferPatchGeneration, commitMS, replayEndMS - commitMS,
-        totalMS - replayEndMS, totalMS, deltaKnown ? 1U : 0U, changes.size(), changedBytes);
+        m_EventID, next.size(), bytes, firstAffected, m_SharedBufferPatchGeneration, commitMS,
+        replayEndMS - commitMS, totalMS - replayEndMS, totalMS, deltaKnown ? 1U : 0U,
+        changes.size(), changedBytes);
     RDCLOG("[EIDTiming] %s", line.c_str());
     AppendReplayTimingLog(line);
   }
@@ -1656,7 +1692,6 @@ void ReplayController::AddFakeMarkers()
   // re-configure the previous/next pointeres
   m_Actions.clear();
   SetupActionPointers(m_Actions, m_FrameRecord.actionList);
-
 }
 
 rdcarray<CounterResult> ReplayController::FetchCounters(const rdcarray<GPUCounter> &counters)
@@ -3544,6 +3579,17 @@ void ReplayController::ReplaceResource(ResourceId from, ResourceId to)
   }
   EndAnalysisForMutation();
 
+  const auto existingShader = m_GlobalShaderReplacements.find(from);
+  if(existingShader != m_GlobalShaderReplacements.end() && existingShader->second == to &&
+     m_TargetResources.find(to) != m_TargetResources.end())
+  {
+    // Preserve the legacy API for other resources. Immutable shader targets can use the checked
+    // backend ownership proof to avoid rebuilding and replaying an unchanged installation.
+    const rdcstr unchanged = m_pDevice->ReplaceTargetShaderChecked(from, to);
+    FatalErrorCheck();
+    if(unchanged.empty())
+      return;
+  }
   m_pDevice->ReplaceResource(from, to);
   FatalErrorCheck();
 
@@ -3586,6 +3632,10 @@ rdcstr ReplayController::ReplaceTargetShaderChecked(ResourceId from, ResourceId 
     return error;
 
   auto replacement = m_GlobalShaderReplacements.find(from);
+  // The backend has still validated live ownership and the target identity. Reapplying the
+  // identical admitted target must not replay the frame or redraw every output again.
+  if(replacement != m_GlobalShaderReplacements.end() && replacement->second == to)
+    return {};
   if(replacement == m_GlobalShaderReplacements.end() || replacement->second != to)
   {
     m_GlobalShaderReplacements[from] = to;
@@ -3598,7 +3648,10 @@ rdcstr ReplayController::ReplaceTargetShaderChecked(ResourceId from, ResourceId 
     return {};
   }
 
-  SetFrameEvent(m_EventID, true);
+  {
+    ScopedCheckedShaderReplay mutation(m_pDevice);
+    SetFrameEvent(m_EventID, true);
+  }
 
   for(size_t i = 0; i < m_Outputs.size(); i++)
     if(m_Outputs[i]->GetType() != ReplayOutputType::Headless)
@@ -3630,7 +3683,10 @@ bool ReplayController::EndShaderReplacementBatch(uint64_t token)
     // Explicit user event changes during the batch take precedence. Resource
     // identity, checked driver transactions and cache generations were already
     // committed per item; only the redundant automatic replay was deferred.
-    SetFrameEvent(m_EventID, true);
+    {
+      ScopedCheckedShaderReplay mutation(m_pDevice);
+      SetFrameEvent(m_EventID, true);
+    }
     for(size_t i = 0; i < m_Outputs.size(); i++)
       if(m_Outputs[i]->GetType() != ReplayOutputType::Headless)
         m_Outputs[i]->Display();
@@ -3689,7 +3745,10 @@ rdcstr ReplayController::RemoveTargetShaderReplacementChecked(ResourceId id)
     MarkGlobalShaderReplacementChanged();
   }
 
-  SetFrameEvent(m_EventID, true);
+  {
+    ScopedCheckedShaderReplay mutation(m_pDevice);
+    SetFrameEvent(m_EventID, true);
+  }
 
   for(size_t i = 0; i < m_Outputs.size(); i++)
     if(m_Outputs[i]->GetType() != ReplayOutputType::Headless)
@@ -3872,23 +3931,22 @@ static void PlanReplayCheckpointCandidates(const rdcarray<ActionDescription *> &
     bool moduleChanged = false;
     if(previous)
     {
-      const ActionFlags kind = ActionFlags::Drawcall | ActionFlags::Dispatch | ActionFlags::DispatchRay;
+      const ActionFlags kind =
+          ActionFlags::Drawcall | ActionFlags::Dispatch | ActionFlags::DispatchRay;
       moduleChanged = (previous->flags & kind) != (action->flags & kind) ||
                       previous->depthOut != action->depthOut;
       for(size_t slot = 0; slot < action->outputs.size(); slot++)
         moduleChanged |= previous->outputs[slot] != action->outputs[slot];
 
       const bool spaced = previous->eventId - lastCandidate >= config.minEventGap;
-      if(spaced && (moduleChanged ||
-                    previous->eventId - lastCandidate >= config.minEventGap * 2))
+      if(spaced && (moduleChanged || previous->eventId - lastCandidate >= config.minEventGap * 2))
       {
         ReplayCheckpointCandidate candidate;
         candidate.eventId = previous->eventId;
         candidate.moduleId = module;
         // Favour the end of a long attachment group within each region of the frame.
         candidate.priority = (moduleChanged ? 2U : 1U) * config.minEventGap +
-                             RDCMIN(previous->eventId - moduleStart,
-                                    config.minEventGap * 4);
+                             RDCMIN(previous->eventId - moduleStart, config.minEventGap * 4);
         candidates.push_back(candidate);
         lastCandidate = previous->eventId;
       }
@@ -3924,7 +3982,7 @@ void ReplayController::PlanReplayCheckpoints()
     resourceBytes += texture.byteSize;
   m_CheckpointResourceBytes = resourceBytes;
   PlanReplayCheckpointCandidates(m_Actions, resourceBytes, m_CheckpointCaptureBytes,
-                                  m_CheckpointConfig, m_CheckpointCandidates);
+                                 m_CheckpointConfig, m_CheckpointCandidates);
 }
 
 void ReplayController::CheckpointReferenceCost::Add(double ms)
@@ -3940,8 +3998,7 @@ void ReplayController::CheckpointReferenceCost::Add(double ms)
 
 double ReplayController::CheckpointReferenceCost::Baseline() const
 {
-  return count == 0 ? 0.0 : count == 1 ? milliseconds[0]
-                                      : RDCMIN(milliseconds[0], milliseconds[1]);
+  return count == 0 ? 0.0 : count == 1 ? milliseconds[0] : RDCMIN(milliseconds[0], milliseconds[1]);
 }
 
 void ReplayController::ConfigureInitialReplayCheckpoints()
@@ -3958,7 +4015,8 @@ void ReplayController::ConfigureInitialReplayCheckpoints()
   m_CheckpointIdlePrewarm = Process::GetEnvVariable("RENDERDOC_REPLAY_DISABLE_IDLE_PREWARM") != "1";
   m_CheckpointControlMode = "automatic";
   m_CheckpointAutoCapacity = m_CheckpointConfig.maxCheckpoints;
-  m_CheckpointConfig.byteBudget = RDCMIN<uint64_t>(m_CheckpointConfig.byteBudget, 512ULL * 1024 * 1024);
+  m_CheckpointConfig.byteBudget =
+      RDCMIN<uint64_t>(m_CheckpointConfig.byteBudget, 512ULL * 1024 * 1024);
   m_CheckpointConfig.enabled = false;
   m_pDevice->ConfigureReplayCheckpoints(m_CheckpointConfig, {});
   const ReplayCheckpointStats stats = m_pDevice->GetReplayCheckpointStats();
@@ -3985,13 +4043,23 @@ void ReplayController::ResetAutomaticCheckpointCosts(uint32_t firstAffectedEvent
   for(size_t i = 0; i < m_AutomaticCheckpointPoints.size();)
   {
     AutomaticCheckpointPoint &point = m_AutomaticCheckpointPoints[i];
-    if(firstAffectedEvent == 0 || point.candidate.eventId >= firstAffectedEvent)
+    // A requested module boundary can fall back to a much earlier native submission. Mutations
+    // invalidate actual saved versions, not that original request's EID. Retain an independently
+    // proved upstream point and clamp its future planning request to the unaffected prefix.
+    if(firstAffectedEvent)
+      for(auto it = point.nativeEvents.lower_bound(firstAffectedEvent);
+          it != point.nativeEvents.end();)
+        it = point.nativeEvents.erase(it);
+    const bool requestedSuffix = point.candidate.eventId >= firstAffectedEvent;
+    if(firstAffectedEvent == 0 || (requestedSuffix && point.nativeEvents.empty()))
     {
       m_AutomaticCheckpointPoints.erase(i);
       m_CheckpointAutoConfigurationDirty = true;
     }
     else
     {
+      if(requestedSuffix)
+        point.candidate.eventId = firstAffectedEvent - 1;
       // The native upstream version survives. New downstream shader work must establish a new
       // same-event baseline before its benefit is assumed to survive as well.
       point.retained = false;
@@ -4054,10 +4122,19 @@ ReplayController::AutomaticCheckpointRequest ReplayController::BeginAutomaticChe
   const bool bufferEdit = (path & 4) != 0;
   const uint32_t requiredReferences = bufferEdit ? 1 : 2;
   const double baseline = reference.Baseline();
-  const bool stable = reference.count < 2 ||
-                      RDCMAX(reference.milliseconds[0], reference.milliseconds[1]) <= baseline * 1.25;
-  request.reference = reference.count < requiredReferences || !stable ||
-                      reference.hitsSinceReference >= 8;
+  const bool stable = reference.count < 2 || RDCMAX(reference.milliseconds[0],
+                                                    reference.milliseconds[1]) <= baseline * 1.25;
+  request.reference =
+      reference.count < requiredReferences || !stable || reference.hitsSinceReference >= 8;
+  // Retained points already earned their storage through independent hit/reference evidence.
+  // Repeating a slower reference every eight interactions is an audit policy, not a correctness
+  // requirement. Resource/version validation still runs in the driver on every actual restore.
+  if(reference.count >= requiredReferences && stable)
+    for(const AutomaticCheckpointPoint &point : m_AutomaticCheckpointPoints)
+      if(point.retained)
+        for(uint32_t nativeEvent : point.nativeEvents)
+          if(nativeEvent < eventId && request.before.events.contains(nativeEvent))
+            request.reference = false;
   // Give an idle-built point a short initial trial, counted across EIDs rather than per key.
   // Once any eligible point exhausts that grace, the user's next request is the ordinary
   // reference itself. No extra replay is submitted, and continuously new EIDs cannot renew it.
@@ -4084,13 +4161,13 @@ ReplayController::AutomaticCheckpointRequest ReplayController::BeginAutomaticChe
   }
   if(!request.reference && !pendingTrial && !unpaid &&
      m_AutomaticCheckpointPoints.size() < m_CheckpointAutoCapacity &&
-     m_CheckpointAutoTrials < m_CheckpointAutoCapacity * 2 &&
-     (bufferEdit || baseline >= 16.0))
+     m_CheckpointAutoTrials < m_CheckpointAutoCapacity * 2 && (bufferEdit || baseline >= 16.0))
   {
     ReplayCheckpointCandidate selected;
     bool found = false;
     rdcarray<ReplayCheckpointCandidate> possible = m_CheckpointCandidates;
-    const uint32_t firstConsumer = bufferEdit ? m_pDevice->GetReplayBufferPatchFirstAffectedEvent() : 0;
+    const uint32_t firstConsumer =
+        bufferEdit ? m_pDevice->GetReplayBufferPatchFirstAffectedEvent() : 0;
     if(firstConsumer > 0 && firstConsumer <= eventId)
     {
       // This cutoff comes from the driver's complete native consumer index, not GetUsage or EID
@@ -4113,7 +4190,7 @@ ReplayController::AutomaticCheckpointRequest ReplayController::BeginAutomaticChe
                                       : point.candidate.eventId - candidate.eventId;
         overlaps |= point.candidate.eventId == candidate.eventId ||
                     (!bufferEdit && (point.candidate.moduleId == candidate.moduleId ||
-                                    distance < m_CheckpointConfig.minEventGap * 4));
+                                     distance < m_CheckpointConfig.minEventGap * 4));
       }
       if(!overlaps && (!found || candidate.eventId > selected.eventId))
       {
@@ -4123,8 +4200,9 @@ ReplayController::AutomaticCheckpointRequest ReplayController::BeginAutomaticChe
     }
     if(found)
     {
-      if(m_CheckpointAutoTrials == 0 && bufferEdit)
-        m_CheckpointConfig.byteBudget = RDCMIN<uint64_t>(m_CheckpointConfig.byteBudget, 64ULL * 1024 * 1024);
+      // Keep the capture's bounded storage budget. A temporary parameter-edit trial must not
+      // permanently shrink it and evict every useful existing upstream point. Native admission
+      // still caps total storage by this budget and current GPU headroom.
       AutomaticCheckpointPoint point;
       point.candidate = selected;
       point.bufferEdit = bufferEdit;
@@ -4266,8 +4344,7 @@ void ReplayController::ObserveAutomaticCheckpointRequest(const AutomaticCheckpoi
     // A new trial owns the configuration cost already charged to its debt above. Its addition
     // must not make a different, retained native checkpoint appear to have a slower restore.
     // Calls that also build remain excluded from clean hit evidence by the guard above.
-    const double cost = driverMS +
-                        ((trial >= 0 && owner != trial) ? 0.0 : request.configurationMS);
+    const double cost = driverMS + ((trial >= 0 && owner != trial) ? 0.0 : request.configurationMS);
     point.hits++;
     point.lastHitMS = cost;
     point.baselineMS = baseline;
@@ -4287,7 +4364,8 @@ void ReplayController::ObserveAutomaticCheckpointRequest(const AutomaticCheckpoi
     {
       reject = true;
       rejectIndex = owner;
-      m_CheckpointAutoReason = gain < -minimumGain ? "restoreRegressedReference" : "insufficientNetBenefit";
+      m_CheckpointAutoReason =
+          gain < -minimumGain ? "restoreRegressedReference" : "insufficientNetBenefit";
     }
   }
   if(trial >= 0 && !reject)
@@ -4318,7 +4396,8 @@ void ReplayController::ObserveAutomaticCheckpointRequest(const AutomaticCheckpoi
       m_CheckpointAutoState = "trial";
   if(!reject && m_AutomaticCheckpointPoints.size())
     m_CheckpointAutoReason = strcmp(m_CheckpointAutoState, "retained") == 0
-                                 ? "measuredBenefitRetained" : "awaitingIndependentHitEvidence";
+                                 ? "measuredBenefitRetained"
+                                 : "awaitingIndependentHitEvidence";
 }
 
 void ReplayController::EndAutomaticCheckpointRequest(const AutomaticCheckpointRequest &request,
@@ -4341,7 +4420,8 @@ void ReplayController::EndAutomaticCheckpointRequest(const AutomaticCheckpointRe
         driverMS, request.configurationMS, m_CheckpointReferenceCosts[request.key].Baseline(),
         after.builds >= request.before.builds ? after.builds - request.before.builds : 0,
         after.hits >= request.before.hits ? after.hits - request.before.hits : 0,
-        m_CheckpointAutoState, m_CheckpointAutoReason, m_CheckpointAutoDebtMS, m_CheckpointAutoSavingsMS);
+        m_CheckpointAutoState, m_CheckpointAutoReason, m_CheckpointAutoDebtMS,
+        m_CheckpointAutoSavingsMS);
     RDCLOG("[EIDTiming] %s", line.c_str());
     AppendReplayTimingLog(line);
   }
@@ -4739,7 +4819,8 @@ rdcstr ReplayController::RunIdleCheckpointMaintenance(uint32_t expectedEventId,
   if(EIDTimingEnabled())
     AppendReplayTimingLog(StringFormat::Fmt(
         "api=ReplayCheckpointMaintenance eid=%u candidate=%u reason=%s builds=%llu hits=%llu "
-        "configuration_ms=%.3f replay_ms=%.3f total_ms=%.3f", expectedEventId, candidateEvent, reason,
+        "configuration_ms=%.3f replay_ms=%.3f total_ms=%.3f",
+        expectedEventId, candidateEvent, reason,
         after.builds >= before.builds ? after.builds - before.builds : 0,
         after.hits >= before.hits ? after.hits - before.hits : 0, configurationMS, replayMS, elapsed));
   return receipt(reason);
@@ -4760,25 +4841,25 @@ rdcstr ReplayController::GetReplayCheckpointStatus()
       reason += c;
   }
   rdcstr result = StringFormat::Fmt(
-      "{\"schema\":\"renderdoc-replay-checkpoints/v1\",\"pipelineStateReuse\":true,\"supported\":%s,\"enabled\":%s,"
+      "{\"schema\":\"renderdoc-replay-checkpoints/"
+      "v1\",\"pipelineStateReuse\":true,\"supported\":%s,\"enabled\":%s,"
       "\"captureBytes\":%llu,\"byteBudget\":%llu,\"maxCheckpoints\":%u,\"minEventGap\":%u,"
       "\"checkpointCount\":%u,\"allocatedBytes\":%llu,\"sharedBytes\":%llu,\"builds\":%llu,"
       "\"hits\":%llu,\"misses\":%llu,\"invalidations\":%llu,\"rejected\":%llu,"
       "\"lastResumeEvent\":%u,\"lastSaveEvent\":%u,\"reason\":\"%s\",\"events\":[",
       stats.supported ? "true" : "false", stats.enabled ? "true" : "false",
       m_CheckpointCaptureBytes, m_CheckpointConfig.byteBudget, m_CheckpointConfig.maxCheckpoints,
-      m_CheckpointConfig.minEventGap, stats.checkpointCount, stats.allocatedBytes, stats.sharedBytes,
-      stats.builds, stats.hits, stats.misses, stats.invalidations, stats.rejected,
-      stats.lastResumeEvent, stats.lastSaveEvent, reason.c_str());
+      m_CheckpointConfig.minEventGap, stats.checkpointCount, stats.allocatedBytes,
+      stats.sharedBytes, stats.builds, stats.hits, stats.misses, stats.invalidations,
+      stats.rejected, stats.lastResumeEvent, stats.lastSaveEvent, reason.c_str());
   for(size_t i = 0; i < stats.events.size(); i++)
     result += StringFormat::Fmt("%s%u", i ? "," : "", stats.events[i]);
   result += "],\"candidates\":[";
   for(size_t i = 0; i < m_CheckpointCandidates.size(); i++)
   {
     const ReplayCheckpointCandidate &candidate = m_CheckpointCandidates[i];
-    result += StringFormat::Fmt("%s{\"eventId\":%u,\"moduleId\":%u,\"priority\":%u}",
-                                i ? "," : "", candidate.eventId, candidate.moduleId,
-                                candidate.priority);
+    result += StringFormat::Fmt("%s{\"eventId\":%u,\"moduleId\":%u,\"priority\":%u}", i ? "," : "",
+                                candidate.eventId, candidate.moduleId, candidate.priority);
   }
   result += StringFormat::Fmt(
       "],\"automatic\":{\"mode\":\"%s\",\"state\":\"%s\",\"reason\":\"%s\","
@@ -4988,7 +5069,8 @@ public:
     FAIL("Unexpected native GetShaderEntryPoints during idle maintenance");
     return {};
   }
-  const ShaderReflection *GetShader(ResourceId pipeline, ResourceId shader, ShaderEntryPoint entry) override
+  const ShaderReflection *GetShader(ResourceId pipeline, ResourceId shader,
+                                    ShaderEntryPoint entry) override
   {
     FAIL("Unexpected native GetShader during idle maintenance");
     return {};
@@ -4998,7 +5080,8 @@ public:
     FAIL("Unexpected native GetDisassemblyTargets during idle maintenance");
     return {};
   }
-  rdcstr DisassembleShader(ResourceId pipeline, const ShaderReflection *refl, const rdcstr &target) override
+  rdcstr DisassembleShader(ResourceId pipeline, const ShaderReflection *refl,
+                           const rdcstr &target) override
   {
     FAIL("Unexpected native DisassembleShader during idle maintenance");
     return {};
@@ -5008,7 +5091,8 @@ public:
     FAIL("Unexpected native GetUsage during idle maintenance");
     return {};
   }
-  void SetPipelineStates(D3D11Pipe::State *d3d11, D3D12Pipe::State *d3d12, GLPipe::State *gl, VKPipe::State *vk) override
+  void SetPipelineStates(D3D11Pipe::State *d3d11, D3D12Pipe::State *d3d12, GLPipe::State *gl,
+                         VKPipe::State *vk) override
   {
     FAIL("Unexpected native SetPipelineStates during idle maintenance");
   }
@@ -5016,12 +5100,14 @@ public:
   {
     FAIL("Unexpected native SavePipelineState during idle maintenance");
   }
-  rdcarray<Descriptor> GetDescriptors(ResourceId descriptorStore, const rdcarray<DescriptorRange> &ranges) override
+  rdcarray<Descriptor> GetDescriptors(ResourceId descriptorStore,
+                                      const rdcarray<DescriptorRange> &ranges) override
   {
     FAIL("Unexpected native GetDescriptors during idle maintenance");
     return {};
   }
-  rdcarray<SamplerDescriptor> GetSamplerDescriptors(ResourceId descriptorStore, const rdcarray<DescriptorRange> &ranges) override
+  rdcarray<SamplerDescriptor> GetSamplerDescriptors(ResourceId descriptorStore,
+                                                    const rdcarray<DescriptorRange> &ranges) override
   {
     FAIL("Unexpected native GetSamplerDescriptors during idle maintenance");
     return {};
@@ -5031,7 +5117,8 @@ public:
     FAIL("Unexpected native GetDescriptorAccess during idle maintenance");
     return {};
   }
-  rdcarray<DescriptorLogicalLocation> GetDescriptorLocations(ResourceId descriptorStore, const rdcarray<DescriptorRange> &ranges) override
+  rdcarray<DescriptorLogicalLocation> GetDescriptorLocations(
+      ResourceId descriptorStore, const rdcarray<DescriptorRange> &ranges) override
   {
     FAIL("Unexpected native GetDescriptorLocations during idle maintenance");
     return {};
@@ -5064,7 +5151,8 @@ public:
   {
     FAIL("Unexpected native InitPostVSBuffers during idle maintenance");
   }
-  MeshFormat GetPostVSBuffers(uint32_t eventId, uint32_t instID, uint32_t viewID, MeshDataStage stage) override
+  MeshFormat GetPostVSBuffers(uint32_t eventId, uint32_t instID, uint32_t viewID,
+                              MeshDataStage stage) override
   {
     FAIL("Unexpected native GetPostVSBuffers during idle maintenance");
     return {};
@@ -5073,11 +5161,14 @@ public:
   {
     FAIL("Unexpected native GetBufferData during idle maintenance");
   }
-  void GetTextureData(ResourceId tex, const Subresource &sub, const GetTextureDataParams &params, bytebuf &data) override
+  void GetTextureData(ResourceId tex, const Subresource &sub, const GetTextureDataParams &params,
+                      bytebuf &data) override
   {
     FAIL("Unexpected native GetTextureData during idle maintenance");
   }
-  void BuildTargetShader(ShaderEncoding sourceEncoding, const bytebuf &source, const rdcstr &entry, const ShaderCompileFlags &compileFlags, ShaderStage type, ResourceId &id, rdcstr &errors) override
+  void BuildTargetShader(ShaderEncoding sourceEncoding, const bytebuf &source, const rdcstr &entry,
+                         const ShaderCompileFlags &compileFlags, ShaderStage type, ResourceId &id,
+                         rdcstr &errors) override
   {
     FAIL("Unexpected native BuildTargetShader during idle maintenance");
   }
@@ -5121,31 +5212,39 @@ public:
     FAIL("Unexpected native FetchCounters during idle maintenance");
     return {};
   }
-  void FillCBufferVariables(ResourceId pipeline, ResourceId shader, ShaderStage stage, rdcstr entryPoint, uint32_t cbufSlot, rdcarray<ShaderVariable> &outvars, const bytebuf &data) override
+  void FillCBufferVariables(ResourceId pipeline, ResourceId shader, ShaderStage stage,
+                            rdcstr entryPoint, uint32_t cbufSlot, rdcarray<ShaderVariable> &outvars,
+                            const bytebuf &data) override
   {
     FAIL("Unexpected native FillCBufferVariables during idle maintenance");
   }
-  rdcarray<PixelModification> PixelHistory(rdcarray<EventUsage> events, ResourceId target, uint32_t x, uint32_t y, const Subresource &sub, CompType typeCast) override
+  rdcarray<PixelModification> PixelHistory(rdcarray<EventUsage> events, ResourceId target,
+                                           uint32_t x, uint32_t y, const Subresource &sub,
+                                           CompType typeCast) override
   {
     FAIL("Unexpected native PixelHistory during idle maintenance");
     return {};
   }
-  ShaderDebugTrace *DebugVertex(uint32_t eventId, uint32_t vertid, uint32_t instid, uint32_t idx, uint32_t view) override
+  ShaderDebugTrace *DebugVertex(uint32_t eventId, uint32_t vertid, uint32_t instid, uint32_t idx,
+                                uint32_t view) override
   {
     FAIL("Unexpected native DebugVertex during idle maintenance");
     return {};
   }
-  ShaderDebugTrace *DebugPixel(uint32_t eventId, uint32_t x, uint32_t y, const DebugPixelInputs &inputs) override
+  ShaderDebugTrace *DebugPixel(uint32_t eventId, uint32_t x, uint32_t y,
+                               const DebugPixelInputs &inputs) override
   {
     FAIL("Unexpected native DebugPixel during idle maintenance");
     return {};
   }
-  ShaderDebugTrace *DebugThread(uint32_t eventId, const rdcfixedarray<uint32_t, 3> &groupid, const rdcfixedarray<uint32_t, 3> &threadid) override
+  ShaderDebugTrace *DebugThread(uint32_t eventId, const rdcfixedarray<uint32_t, 3> &groupid,
+                                const rdcfixedarray<uint32_t, 3> &threadid) override
   {
     FAIL("Unexpected native DebugThread during idle maintenance");
     return {};
   }
-  ShaderDebugTrace *DebugMeshThread(uint32_t eventId, const rdcfixedarray<uint32_t, 3> &groupid, const rdcfixedarray<uint32_t, 3> &threadid) override
+  ShaderDebugTrace *DebugMeshThread(uint32_t eventId, const rdcfixedarray<uint32_t, 3> &groupid,
+                                    const rdcfixedarray<uint32_t, 3> &threadid) override
   {
     FAIL("Unexpected native DebugMeshThread during idle maintenance");
     return {};
@@ -5159,7 +5258,8 @@ public:
   {
     FAIL("Unexpected native FreeDebugger during idle maintenance");
   }
-  ResourceId RenderOverlay(ResourceId texid, FloatVector clearCol, DebugOverlay overlay, uint32_t eventId, const rdcarray<uint32_t> &passEvents) override
+  ResourceId RenderOverlay(ResourceId texid, FloatVector clearCol, DebugOverlay overlay,
+                           uint32_t eventId, const rdcarray<uint32_t> &passEvents) override
   {
     FAIL("Unexpected native RenderOverlay during idle maintenance");
     return {};
@@ -5169,10 +5269,7 @@ public:
     FAIL("Unexpected native IsRenderOutput during idle maintenance");
     return {};
   }
-  void FileChanged() override
-  {
-    FAIL("Unexpected native FileChanged during idle maintenance");
-  }
+  void FileChanged() override { FAIL("Unexpected native FileChanged during idle maintenance"); }
   bool NeedRemapForFetch(const ResourceFormat &format) override
   {
     FAIL("Unexpected native NeedRemapForFetch during idle maintenance");
@@ -5246,17 +5343,21 @@ public:
   {
     FAIL("Unexpected native FlipOutputWindow during idle maintenance");
   }
-  bool GetMinMax(ResourceId texid, const Subresource &sub, CompType typeCast, float *minval, float *maxval) override
+  bool GetMinMax(ResourceId texid, const Subresource &sub, CompType typeCast, float *minval,
+                 float *maxval) override
   {
     FAIL("Unexpected native GetMinMax during idle maintenance");
     return {};
   }
-  bool GetHistogram(ResourceId texid, const Subresource &sub, CompType typeCast, float minval, float maxval, const rdcfixedarray<bool, 4> &channels, rdcarray<uint32_t> &histogram) override
+  bool GetHistogram(ResourceId texid, const Subresource &sub, CompType typeCast, float minval,
+                    float maxval, const rdcfixedarray<bool, 4> &channels,
+                    rdcarray<uint32_t> &histogram) override
   {
     FAIL("Unexpected native GetHistogram during idle maintenance");
     return {};
   }
-  void PickPixel(ResourceId texture, uint32_t x, uint32_t y, const Subresource &sub, CompType typeCast, float pixel[4]) override
+  void PickPixel(ResourceId texture, uint32_t x, uint32_t y, const Subresource &sub,
+                 CompType typeCast, float pixel[4]) override
   {
     FAIL("Unexpected native PickPixel during idle maintenance");
   }
@@ -5265,7 +5366,8 @@ public:
     FAIL("Unexpected native CreateProxyTexture during idle maintenance");
     return {};
   }
-  void SetProxyTextureData(ResourceId texid, const Subresource &sub, byte *data, size_t dataSize) override
+  void SetProxyTextureData(ResourceId texid, const Subresource &sub, byte *data,
+                           size_t dataSize) override
   {
     FAIL("Unexpected native SetProxyTextureData during idle maintenance");
   }
@@ -5297,7 +5399,9 @@ public:
   {
     FAIL("Unexpected native SetCustomShaderIncludes during idle maintenance");
   }
-  void BuildCustomShader(ShaderEncoding sourceEncoding, const bytebuf &source, const rdcstr &entry, const ShaderCompileFlags &compileFlags, ShaderStage type, ResourceId &id, rdcstr &errors) override
+  void BuildCustomShader(ShaderEncoding sourceEncoding, const bytebuf &source, const rdcstr &entry,
+                         const ShaderCompileFlags &compileFlags, ShaderStage type, ResourceId &id,
+                         rdcstr &errors) override
   {
     FAIL("Unexpected native BuildCustomShader during idle maintenance");
   }
@@ -5328,7 +5432,8 @@ public:
   {
     FAIL("Unexpected native RenderHighlightBox during idle maintenance");
   }
-  uint32_t PickVertex(uint32_t eventId, int32_t width, int32_t height, const MeshDisplay &cfg, uint32_t x, uint32_t y) override
+  uint32_t PickVertex(uint32_t eventId, int32_t width, int32_t height, const MeshDisplay &cfg,
+                      uint32_t x, uint32_t y) override
   {
     FAIL("Unexpected native PickVertex during idle maintenance");
     return {};
@@ -5337,7 +5442,7 @@ public:
   {
     uint32_t eventId;
     ReplayLogType type;
-    bool bypass, naturalReference, prefixOnly;
+    bool bypass, naturalReference, prefixOnly, shaderMutation;
   };
   rdcarray<Call> calls;
   rdcarray<ReplayCheckpointCandidate> candidates;
@@ -5401,7 +5506,7 @@ public:
   void ReplayLog(uint32_t event, ReplayLogType type) override
   {
     calls.push_back({event, type, m_ReplayCheckpointBypass, m_ReplayCheckpointNaturalReference,
-                     m_ReplayCheckpointPrefixOnly});
+                     m_ReplayCheckpointPrefixOnly, m_ReplayShaderMutationRoot});
     if(onReplay)
       onReplay();
     if(type != eReplay_WithoutDraw || m_ReplayCheckpointBypass || fail)
@@ -5436,14 +5541,11 @@ public:
   ResourceId target = ResourceIDGen::GetNewUniqueID();
   std::map<ResourceId, uint32_t> references;
   uint32_t releases = 0, clearedOverrides = 0, checkedReplacements = 0;
+  bool acceptChecked = false;
 
-  rdcarray<ShaderEncoding> GetTargetShaderEncodings() override
-  {
-    return {ShaderEncoding::DXIL};
-  }
+  rdcarray<ShaderEncoding> GetTargetShaderEncodings() override { return {ShaderEncoding::DXIL}; }
   void BuildTargetShader(ShaderEncoding, const bytebuf &, const rdcstr &,
-                         const ShaderCompileFlags &, ShaderStage, ResourceId &id,
-                         rdcstr &) override
+                         const ShaderCompileFlags &, ShaderStage, ResourceId &id, rdcstr &) override
   {
     id = target;
     ++references[id];
@@ -5463,7 +5565,7 @@ public:
     REQUIRE((references.find(to) != references.end()));
     ++checkedReplacements;
     // Reaching this method proves controller admission without requiring a GPU replay.
-    return "test driver stops before replay";
+    return acceptChecked ? rdcstr() : rdcstr("test driver stops before replay");
   }
 };
 
@@ -5480,7 +5582,11 @@ struct ReplayControllerTestAccess
     } driver;
     ReplayController controller;
     controller.m_pDevice = &driver;
-    struct Detach { ReplayController &c; ~Detach() { c.m_pDevice = NULL; } } detach = {controller};
+    struct Detach
+    {
+      ReplayController &c;
+      ~Detach() { c.m_pDevice = NULL; }
+    } detach = {controller};
     controller.m_APIProps.pipelineType = GraphicsAPI::D3D11;
     controller.SetFrameEvent(20, true);
     const size_t calls = driver.calls.size();
@@ -5522,20 +5628,26 @@ struct ReplayControllerTestAccess
       rdcarray<DescriptorAccess> GetDescriptorAccess(uint32_t) override { return {}; }
       rdcstr ReplaceTargetShaderChecked(ResourceId original, ResourceId target) override
       {
-        if(!error.empty()) return error;
+        if(!error.empty())
+          return error;
         replacements[original] = target;
         return {};
       }
       rdcstr RemoveTargetShaderReplacementChecked(ResourceId original) override
       {
-        if(!error.empty()) return error;
+        if(!error.empty())
+          return error;
         replacements.erase(original);
         return {};
       }
     } driver;
     ReplayController controller;
     controller.m_pDevice = &driver;
-    struct Detach { ReplayController &c; ~Detach() { c.m_pDevice = NULL; } } detach = {controller};
+    struct Detach
+    {
+      ReplayController &c;
+      ~Detach() { c.m_pDevice = NULL; }
+    } detach = {controller};
     controller.m_APIProps.pipelineType = GraphicsAPI::D3D11;
     controller.m_EventID = controller.m_SelectedEventID = 20;
     const ResourceId original = ResourceIDGen::GetNewUniqueID();
@@ -5546,6 +5658,11 @@ struct ReplayControllerTestAccess
     CHECK(controller.GetTargetShaderReplacement(original) == ResourceId());
     REQUIRE(controller.ReplaceTargetShaderChecked(original, prior).empty());
     CHECK(controller.GetTargetShaderReplacement(original) == prior);
+    CHECK_FALSE(driver.m_ReplayShaderMutationRoot);
+    REQUIRE(driver.calls.size() == 2);
+    CHECK(driver.calls[0].shaderMutation);
+    CHECK(driver.calls[1].shaderMutation);
+    CHECK(driver.calls[0].bypass);    // old result checkpoints still cannot be reused
     REQUIRE(controller.ReplaceTargetShaderChecked(original, debug).empty());
     CHECK(controller.GetTargetShaderReplacement(original) == debug);
     CHECK(controller.GetCurrentEventID() == 20);
@@ -5565,6 +5682,8 @@ struct ReplayControllerTestAccess
     for(uint32_t event : {10U, 80U, 20U})
     {
       controller.SetFrameEvent(event, true);
+      REQUIRE(driver.calls.size() >= 2);
+      CHECK_FALSE(driver.calls.back().shaderMutation);
       CHECK(controller.GetTargetShaderReplacement(original) == debug);
       CHECK(driver.replacements[original] == debug);
       CHECK(controller.GetShaderReplacementGeneration(event) == generation);
@@ -5621,8 +5740,11 @@ struct ReplayControllerTestAccess
       rdcstr SetEventShaderOverride(uint32_t event, ShaderStage stage, ResourceId original,
                                     ResourceId target, uint32_t output, bool independentFloat) override
       {
-        configured.active = true; configured.eventId = event; configured.stage = stage;
-        configured.expectedOriginal = original; configured.replacement = target;
+        configured.active = true;
+        configured.eventId = event;
+        configured.stage = stage;
+        configured.expectedOriginal = original;
+        configured.replacement = target;
         configured.outputTarget = output;
         configured.independentFloatOutput = independentFloat;
         return {};
@@ -5647,14 +5769,23 @@ struct ReplayControllerTestAccess
         }
         return {};
       }
-      void RestoreEventShaderOverrides() override { live = before; applied = false; }
+      void RestoreEventShaderOverrides() override
+      {
+        live = before;
+        applied = false;
+      }
     };
-    for(GraphicsAPI api : {GraphicsAPI::D3D11, GraphicsAPI::D3D12, GraphicsAPI::Vulkan, GraphicsAPI::OpenGL})
+    for(GraphicsAPI api :
+        {GraphicsAPI::D3D11, GraphicsAPI::D3D12, GraphicsAPI::Vulkan, GraphicsAPI::OpenGL})
     {
       EventDriver driver;
       ReplayController controller;
       controller.m_pDevice = &driver;
-      struct Detach { ReplayController &c; ~Detach() { c.m_pDevice = NULL; } } detach = {controller};
+      struct Detach
+      {
+        ReplayController &c;
+        ~Detach() { c.m_pDevice = NULL; }
+      } detach = {controller};
       controller.m_APIProps.pipelineType = api;
       controller.m_EventID = 11;
       controller.m_EventRemap[1] = 11;
@@ -5666,12 +5797,12 @@ struct ReplayControllerTestAccess
         if(call.type == eReplay_WithoutDraw)
         {
           CHECK(driver.live == driver.before);
-          CHECK_FALSE(call.bypass); // safe upstream checkpoints remain usable
+          CHECK_FALSE(call.bypass);    // safe upstream checkpoints remain usable
         }
         if(call.type == eReplay_OnlyDraw && driver.applied)
         {
           CHECK(driver.live == driver.configured.replacement);
-          CHECK(call.bypass); // the debug result must never become an upstream checkpoint
+          CHECK(call.bypass);    // the debug result must never become an upstream checkpoint
         }
       };
       CHECK_FALSE(controller.GetEventShaderOverride(1, ShaderStage::Pixel).active);
@@ -5702,7 +5833,14 @@ struct ReplayControllerTestAccess
 
   static void CheckEventShaderFatalErrors()
   {
-    enum class FailurePoint { Clear, ClearAll, Preview, Register, Apply };
+    enum class FailurePoint
+    {
+      Clear,
+      ClearAll,
+      Preview,
+      Register,
+      Apply
+    };
     struct EventDriver : IdleCheckpointTestDriver
     {
       FailurePoint point = FailurePoint::Clear;
@@ -5752,9 +5890,14 @@ struct ReplayControllerTestAccess
       driver.point = point;
       ReplayController controller;
       controller.m_pDevice = &driver;
-      struct Detach { ReplayController &c; ~Detach() { c.m_pDevice = NULL; } } detach = {controller};
+      struct Detach
+      {
+        ReplayController &c;
+        ~Detach() { c.m_pDevice = NULL; }
+      } detach = {controller};
       controller.m_APIProps.pipelineType = GraphicsAPI::D3D11;
-      controller.m_EventID = point == FailurePoint::Register || point == FailurePoint::Apply ? 11 : 12;
+      controller.m_EventID =
+          point == FailurePoint::Register || point == FailurePoint::Apply ? 11 : 12;
       controller.m_EventRemap[1] = 11;
       const ResourceId original = ResourceIDGen::GetNewUniqueID();
       const ResourceId prior = ResourceIDGen::GetNewUniqueID();
@@ -5771,12 +5914,13 @@ struct ReplayControllerTestAccess
           break;
         case FailurePoint::ClearAll: controller.ClearEventShaderOverrides(); break;
         case FailurePoint::Preview:
-          CHECK(controller.GetEventShaderPreviewTexture(1, ShaderStage::Pixel).resourceId == ResourceId());
+          CHECK(controller.GetEventShaderPreviewTexture(1, ShaderStage::Pixel).resourceId ==
+                ResourceId());
           break;
         case FailurePoint::Register:
         case FailurePoint::Apply:
-          CHECK_FALSE(controller.SetEventShaderOverride(1, ShaderStage::Pixel, original, next, 0,
-                                                         true).empty());
+          CHECK_FALSE(
+              controller.SetEventShaderOverride(1, ShaderStage::Pixel, original, next, 0, true).empty());
           break;
       }
 
@@ -5797,8 +5941,8 @@ struct ReplayControllerTestAccess
       controller.ClearEventShaderOverride(1, ShaderStage::Pixel);
       controller.ClearEventShaderOverrides();
       CHECK(controller.GetEventShaderPreviewTexture(1, ShaderStage::Pixel).resourceId == ResourceId());
-      CHECK_FALSE(controller.SetEventShaderOverride(1, ShaderStage::Pixel, original, next, 0,
-                                                     true).empty());
+      CHECK_FALSE(
+          controller.SetEventShaderOverride(1, ShaderStage::Pixel, original, next, 0, true).empty());
       CHECK(driver.operations == operations);
       CHECK(controller.GetEventShaderOverride(1, ShaderStage::Pixel).active);
     }
@@ -5902,7 +6046,8 @@ struct ReplayControllerTestAccess
       CHECK_FALSE(result.reason.empty());
       CHECK(result.outputs.empty());
       CHECK(controller.m_EventID == 100);
-      CHECK((controller.m_AnalysisReplayState == ReplayController::AnalysisReplayState::PendingOrFailed));
+      CHECK((controller.m_AnalysisReplayState ==
+             ReplayController::AnalysisReplayState::PendingOrFailed));
     }
     SECTION("Wrong identity, incomplete bytes, duplicate slots and invalid formats are rejected")
     {
@@ -5927,7 +6072,8 @@ struct ReplayControllerTestAccess
         CHECK_FALSE(result.completed);
         CHECK_FALSE(result.reason.empty());
         CHECK(result.outputs.empty());
-        CHECK((controller.m_AnalysisReplayState == ReplayController::AnalysisReplayState::PendingOrFailed));
+        CHECK((controller.m_AnalysisReplayState ==
+               ReplayController::AnalysisReplayState::PendingOrFailed));
       }
     }
     SECTION("Existing replacements and foreign candidates are rejected before native work")
@@ -5956,8 +6102,10 @@ struct ReplayControllerTestAccess
       ~DetachDriver() { controller.m_pDevice = NULL; }
     } detach = {controller};
     const auto build = [&]() {
-      return controller.BuildTargetShader("MainPS", ShaderEncoding::DXIL, bytebuf{1},
-                                          ShaderCompileFlags(), ShaderStage::Pixel).first;
+      return controller
+          .BuildTargetShader("MainPS", ShaderEncoding::DXIL, bytebuf{1}, ShaderCompileFlags(),
+                             ShaderStage::Pixel)
+          .first;
     };
 
     const ResourceId original = ResourceIDGen::GetNewUniqueID();
@@ -5995,6 +6143,16 @@ struct ReplayControllerTestAccess
             "test driver stops before replay");
       CHECK(driver.checkedReplacements == 1);
     }
+    SECTION("An identical checked target still validates ownership without replaying the frame")
+    {
+      driver.acceptChecked = true;
+      CHECK(controller.ReplaceTargetShaderChecked(original, target).empty());
+      CHECK(driver.checkedReplacements == 1);
+      CHECK(controller.m_GlobalShaderReplacementGeneration == globalGeneration);
+      CHECK(controller.GetShaderReplacementGeneration(80) == eventGeneration);
+      CHECK(driver.references[target] == 1);
+      CHECK(driver.clearedOverrides == 0);
+    }
     SECTION("A target with one owner retains the ordinary final release behavior")
     {
       CHECK(driver.references[target] == 1);
@@ -6012,8 +6170,8 @@ struct ReplayControllerTestAccess
     const uint32_t releases = driver.releases;
     controller.FreeTargetResource(target);
     CHECK(driver.releases == releases);
-    CHECK(controller.ReplaceTargetShaderChecked(original, target).contains(
-        "not created by BuildTargetShader"));
+    CHECK(controller.ReplaceTargetShaderChecked(original, target)
+              .contains("not created by BuildTargetShader"));
   }
 
   static void CheckTargetShaderShutdown()
@@ -6046,8 +6204,10 @@ struct ReplayControllerTestAccess
       ~DetachDriver() { controller.m_pDevice = NULL; }
     } detach = {controller};
     const auto build = [&]() {
-      return controller.BuildTargetShader("MainPS", ShaderEncoding::DXIL, bytebuf{1},
-                                          ShaderCompileFlags(), ShaderStage::Pixel).first;
+      return controller
+          .BuildTargetShader("MainPS", ShaderEncoding::DXIL, bytebuf{1}, ShaderCompileFlags(),
+                             ShaderStage::Pixel)
+          .first;
     };
 
     const ResourceId original = ResourceIDGen::GetNewUniqueID();
@@ -6263,7 +6423,8 @@ struct ReplayControllerTestAccess
       CHECK(controller.RunIdleCheckpointMaintenance(100, 8, 6).contains("alreadyAttempted"));
       controller.ConfigureReplayCheckpoints(true, 1024 * 1024, 3);
       // This fake capture has no actions, so explicit replanning correctly leaves no candidate.
-      CHECK(controller.RunIdleCheckpointMaintenance(100, 8, 6).contains("noMissingExplicitCandidate"));
+      CHECK(controller.RunIdleCheckpointMaintenance(100, 8, 6).contains(
+          "noMissingExplicitCandidate"));
       CHECK(driver.calls.size() == 4);
     }
     SECTION("Cold automatic prewarming builds bounded prefixes without changing the selected event")
@@ -6486,7 +6647,8 @@ struct ReplayControllerTestAccess
       CHECK(controller.m_CheckpointAutoReferences == 0);
       driver.InvalidateReplayCheckpoints(0);
       controller.ResetAutomaticCheckpointCosts(0);
-      CHECK(controller.RunIdleCheckpointMaintenance(100, 8, 6).contains("noMissingMeasuredUsefulPoint"));
+      CHECK(controller.RunIdleCheckpointMaintenance(100, 8, 6).contains(
+          "noMissingMeasuredUsefulPoint"));
       CHECK(driver.calls.size() == 2);
     }
     SECTION("Automatic maintenance restores policy and charges work without inventing hit evidence")
@@ -6519,7 +6681,8 @@ struct ReplayControllerTestAccess
       CHECK_FALSE(driver.stats.events.contains(95U));
       CHECK(controller.m_CheckpointAutoDebtMS == controller.m_IdleCheckpointTotalMS);
       CHECK(controller.m_CheckpointAutoDebtMS > 0.0);
-      CHECK(controller.m_AutomaticCheckpointPoints[1].debtMS == 3.0 + controller.m_IdleCheckpointTotalMS);
+      CHECK(controller.m_AutomaticCheckpointPoints[1].debtMS ==
+            3.0 + controller.m_IdleCheckpointTotalMS);
       CHECK_FALSE(controller.m_AutomaticCheckpointPoints[1].retained);
       CHECK(controller.m_AutomaticCheckpointPoints[1].hits == 0);
       CHECK(controller.m_AutomaticCheckpointPoints[1].profitableHits == 0);
@@ -6531,7 +6694,10 @@ struct ReplayControllerTestAccess
     SECTION("Reentrant maintenance cannot submit a second work unit")
     {
       uint32_t reentries = 0;
-      driver.onReplay = [&]() { CHECK(run().contains("alreadyRunning")); ++reentries; };
+      driver.onReplay = [&]() {
+        CHECK(run().contains("alreadyRunning"));
+        ++reentries;
+      };
       CHECK(run().contains("checkpointBuilt"));
       CHECK(driver.calls.size() == 2);
       CHECK(reentries == 2);
@@ -6665,6 +6831,58 @@ struct ReplayControllerTestAccess
       REQUIRE(controller.m_AutomaticCheckpointPoints.size() == 1);
       CHECK(controller.m_AutomaticCheckpointPoints[0].retained);
       CHECK(controller.m_RejectedCheckpointCandidates.empty());
+    }
+    SECTION("Retained measured points do not force periodic full-prefix timing audits")
+    {
+      controller.m_AutomaticCheckpointPoints[0].retained = true;
+      auto &reference = controller.m_CheckpointReferenceCosts[uint64_t(100) << 3];
+      reference.Add(100.0);
+      reference.Add(100.0);
+      reference.hitsSinceReference = 100;
+      CHECK_FALSE(visit(100, 70.0));
+      CHECK(controller.m_CheckpointAutoReferences == 0);
+      CHECK(controller.m_AutomaticCheckpointPoints[0].retained);
+    }
+    SECTION("Parameter trials retain the capture budget across later shader and EID visits")
+    {
+      controller.m_CheckpointConfig.byteBudget = 256ULL * 1024 * 1024;
+      controller.m_CheckpointAutoTrials = 0;
+      controller.m_AutomaticCheckpointPoints.clear();
+      driver.stats.events.clear();
+      driver.patchAnchor = 60;
+      controller.m_CheckpointReferenceCosts[(uint64_t(100) << 3) | 4].Add(100.0);
+      const auto request = controller.BeginAutomaticCheckpointRequest(100, 4);
+      CHECK(request.active);
+      CHECK_FALSE(request.reference);
+      REQUIRE(controller.m_AutomaticCheckpointPoints.size() == 1);
+      CHECK(controller.m_CheckpointConfig.byteBudget == 256ULL * 1024 * 1024);
+      controller.EndAutomaticCheckpointRequest(request, 70.0);
+      controller.ResetAutomaticCheckpointCosts(0);
+      CHECK(controller.m_CheckpointConfig.byteBudget == 256ULL * 1024 * 1024);
+    }
+    SECTION("A fallback native point before an edit survives a later requested module boundary")
+    {
+      controller.m_AutomaticCheckpointPoints[0].candidate.eventId = 80;
+      controller.m_AutomaticCheckpointPoints[0].nativeEvents = {60, 75};
+      controller.ResetAutomaticCheckpointCosts(70);
+      REQUIRE(controller.m_AutomaticCheckpointPoints.size() == 1);
+      CHECK(controller.m_AutomaticCheckpointPoints[0].candidate.eventId == 69);
+      CHECK(controller.m_AutomaticCheckpointPoints[0].nativeEvents == std::set<uint32_t>{60});
+      CHECK_FALSE(controller.m_AutomaticCheckpointPoints[0].retained);
+      controller.ResetAutomaticCheckpointCosts(60);
+      CHECK(controller.m_AutomaticCheckpointPoints.empty());
+    }
+    SECTION("Forward materialized visits do not train or bypass native continuation")
+    {
+      controller.m_MaterializedEventID = 90;
+      controller.m_MaterializedEventValid = true;
+      controller.ReplayEvent(100, false, false, false);
+      REQUIRE(driver.calls.size() == 2);
+      CHECK_FALSE(driver.calls[0].bypass);
+      CHECK_FALSE(driver.calls[0].naturalReference);
+      CHECK(controller.m_CheckpointReferenceCosts.empty());
+      CHECK(controller.m_CheckpointAutoReferences == 0);
+      CHECK(controller.m_AutomaticCheckpointPoints[0].requests == 0);
     }
     SECTION("A comparable hit without savings retires the point and suppresses retry")
     {
@@ -7028,9 +7246,15 @@ TEST_CASE("Event Shader variant caches separate exact live pipeline and output i
   EventShaderPipelineKey other = first;
   other.pipeline = ResourceIDGen::GetNewUniqueID();
   cache[other] = 2;
-  other = first; other.outputTarget = 0; cache[other] = 3;
-  other = first; other.eventId = 123; cache[other] = 4;
-  other = first; other.replacements[4] = ResourceIDGen::GetNewUniqueID(); cache[other] = 5;
+  other = first;
+  other.outputTarget = 0;
+  cache[other] = 3;
+  other = first;
+  other.eventId = 123;
+  cache[other] = 4;
+  other = first;
+  other.replacements[4] = ResourceIDGen::GetNewUniqueID();
+  cache[other] = 5;
   CHECK(cache.size() == 5);
   CHECK(first.Uses(first.replacements[4]));
   CHECK_FALSE(first.Uses(other.replacements[4]));
@@ -7095,19 +7319,24 @@ TEST_CASE("Shared replay checkpoint intent is scoped across analysis and fatal d
     ScopedSharedBufferPatchReplay edit(driver, sharedReplay);
     CHECK(sharedReplay);
     CHECK(driver->m_ReplayCheckpointPrefixOnly);
+    CHECK(driver->m_ReplayBufferMutationRoot);
     {
       ScopedCheckpointAnalysisBypass analysis(driver);
       CHECK(driver->m_ReplayCheckpointBypass);
       CHECK_FALSE(driver->m_ReplayCheckpointPrefixOnly);
+      CHECK_FALSE(driver->m_ReplayBufferMutationRoot);
     }
     CHECK(driver->m_ReplayCheckpointPrefixOnly);
     CHECK_FALSE(driver->m_ReplayCheckpointBypass);
+    CHECK(driver->m_ReplayBufferMutationRoot);
     // FatalErrorCheck swaps this pointer while the original object is no longer safe to touch.
     driver = &dummy;
     dummy.m_ReplayCheckpointPrefixOnly = true;
+    dummy.m_ReplayBufferMutationRoot = true;
   }
   CHECK_FALSE(sharedReplay);
   CHECK_FALSE(dummy.m_ReplayCheckpointPrefixOnly);
+  CHECK_FALSE(dummy.m_ReplayBufferMutationRoot);
   {
     dummy.m_ReplayCheckpointPrefixOnly = true;
     sharedReplay = true;
@@ -7115,6 +7344,25 @@ TEST_CASE("Shared replay checkpoint intent is scoped across analysis and fatal d
   }
   CHECK(sharedReplay);
   CHECK(dummy.m_ReplayCheckpointPrefixOnly);
+}
+
+TEST_CASE("Checked shader replay intent cannot escape into analysis or a later force replay",
+          "[replay][shader][checkpoints]")
+{
+  IdleCheckpointTestDriver original, dummy;
+  IReplayDriver *driver = &original;
+  {
+    ScopedCheckedShaderReplay mutation(driver);
+    CHECK(driver->m_ReplayShaderMutationRoot);
+    {
+      ScopedCheckpointAnalysisBypass analysis(driver);
+      CHECK_FALSE(driver->m_ReplayShaderMutationRoot);
+    }
+    CHECK(driver->m_ReplayShaderMutationRoot);
+    driver = &dummy;
+    dummy.m_ReplayShaderMutationRoot = true;
+  }
+  CHECK_FALSE(dummy.m_ReplayShaderMutationRoot);
 }
 
 TEST_CASE("Read-only event selection reuses current pipelines and invalidates on edits",

@@ -807,7 +807,9 @@ class DxilAccessWorkspaceEvidenceTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(
             dir=os.environ.get("RENDERDOC_ULTRA_TEST_TEMP", None)
         )
-        self.root = Path(self.temporary.name)
+        # Private evidence helpers receive the canonical root established by
+        # public workspace entry points, including Windows short TEMP paths.
+        self.root = Path(self.temporary.name).resolve()
         self.script = self.root / "route_tool.py"
         self.script.write_text(ROUTE_TOOL, encoding="utf-8")
         self.fixed_ir = self.root / "fixed.ll"
@@ -1183,6 +1185,51 @@ class DxilAccessWorkspaceEvidenceTests(unittest.TestCase):
         )
         return service, workspace, manifest, compiled
 
+    def test_compile_only_import_gets_independent_access_evidence(self) -> None:
+        self._assert_compile_only_import_access_evidence(native=False)
+
+    def test_native_compile_only_import_gets_independent_access_evidence(self) -> None:
+        self._assert_compile_only_import_access_evidence(native=True)
+
+    def _assert_compile_only_import_access_evidence(self, *, native: bool) -> None:
+        # Imported HLSL has no decompile hop. It still needs actual original
+        # and candidate IR rather than trusting its source declarations.
+        routes = [route for route in self.routes if route["routeId"] not in
+                  ("fixed-dxil-assembly", "fixed-dxil-spirv", "fixed-spirv-hlsl")]
+        atomic_write_json(
+            self.routes_path, toolchain_document(self.tools_path, routes, [])
+        )
+        service = ShaderWorkspaceService(self.tools_path, self.routes_path)
+        workspace = self.root / "compile-only-access"
+        created = service.create(
+            self.catalog_path, self.key.catalog_key, workspace, editable_format="hlsl"
+        )
+        self.assertEqual([], created["routePlan"]["decompile"])
+        represented = service.representation(workspace)
+        source = b"float4 main() : SV_Target { return float4(1, 0, 0, 1); }\n"
+        (workspace / "explanation" / "promoted.hlsl").write_bytes(source)
+        service.promote_explanatory_source(
+            workspace,
+            expected_representation_sha256=represented["sha256"],
+            expected_source_sha256=hashlib.sha256(source).hexdigest(),
+            acknowledge_semantic_equivalence_unverified=True,
+        )
+        if native:
+            from tests.test_native_shader_compile import response
+            service._native_compile_provider = lambda request: response(request, self.blob)
+        compiled = service.compile(workspace)
+        if native:
+            self.assertEqual("renderdoc-native", compiled["compilerBackend"])
+        manifest = json.loads((workspace / "manifest.json").read_text(encoding="utf-8"))
+        for role in ("baseline", "candidate"):
+            self.assertIsNotNone(service._dedicated_dxil_asm_evidence(workspace, manifest, role))
+        response = abi_support.reflection_response(
+            ambiguous_interface(), compiled["rawSha256"],
+            Path(compiled["candidateBlobPath"]).stat().st_size,
+        )
+        response["encoding"] = "dxil"
+        self.assertTrue(service.validate_candidate_reflection(workspace, response)["compatible"])
+
     def test_repeated_access_validation_reuses_only_hash_bound_parse(self) -> None:
         service, workspace, manifest, _compiled = (
             self._compiled_hlsl_evidence_manifest("hlsl-access-parse-cache")
@@ -1332,7 +1379,13 @@ class DxilAccessWorkspaceEvidenceTests(unittest.TestCase):
 
     @staticmethod
     def _revision_publish_denied(staging: Path, destination: Path) -> PermissionError:
-        error = PermissionError(13, "Access is denied", str(staging))
+        class WindowsPublishDenied(PermissionError):
+            # POSIX OSError does not render winerror, even when that attribute
+            # is supplied. Keep the simulated historical Windows record exact
+            # so recovery remains tested on Linux and macOS too.
+            def __str__(self) -> str:
+                return "[WinError 5] Access is denied: %r -> %r" % (self.filename, self.filename2)
+        error = WindowsPublishDenied(13, "Access is denied", str(staging))
         error.winerror = 5
         error.filename2 = str(destination)
         return error
@@ -1355,6 +1408,15 @@ class DxilAccessWorkspaceEvidenceTests(unittest.TestCase):
         with mock.patch.object(Path, "replace", fail_once), mock.patch(
             "src.shader_workspace.workspace.time.sleep", return_value=None
         ):
+            if os.name != "nt":
+                # POSIX permission errors are not Windows sharing violations;
+                # retain the original failure and the preceding valid revision.
+                with self.assertRaises(PermissionError):
+                    service.compile(workspace)
+                self.assertEqual(1, attempts)
+                self.assertEqual(1, json.loads(
+                    (workspace / "manifest.json").read_text(encoding="utf-8"))["revision"])
+                return
             compiled = service.compile(workspace)
 
         self.assertEqual(2, attempts)

@@ -620,8 +620,12 @@ def _native_filesystem_path(path):
     return "\\\\?\\" + absolute
 
 
-def _atomic_write_bytes(path, data):
-    """Write bytes with a same-directory atomic replace (Python 3.6 compatible)."""
+def _atomic_write_bytes(path, data, durable=True):
+    """Atomic replacement; user/IPC documents retain fsync by default.
+
+    Discovery heartbeats can opt out of crash durability while retaining immediate
+    reader visibility and the existing complete-document replacement protocol.
+    """
     absolute_path = os.path.abspath(path)
     directory = os.path.dirname(absolute_path)
     native_directory = _native_filesystem_path(directory)
@@ -635,7 +639,8 @@ def _atomic_write_bytes(path, data):
         with open(native_tmp_path, "wb") as f:
             f.write(data)
             f.flush()
-            os.fsync(f.fileno())
+            if durable:
+                os.fsync(f.fileno())
         for replace_attempt in range(5):
             try:
                 os.replace(native_tmp_path, native_path)
@@ -680,7 +685,7 @@ def _frame_flow_result(value):
     return None
 
 
-def _atomic_write_json(path, value):
+def _atomic_write_json(path, value, durable=True):
     """Write portable Unicode JSON atomically so readers never see a partial document.
 
     IPC documents are UTF-8, and escaping non-ASCII code points additionally
@@ -692,7 +697,7 @@ def _atomic_write_json(path, value):
     if (_frame_flow_result(value) is not None and
             len(encoded) > MAX_FRAME_FLOW_SERIALIZED_BYTES):
         raise ValueError("Frame-flow IPC response exceeds the 8 MiB hard limit")
-    _atomic_write_bytes(path, encoded)
+    _atomic_write_bytes(path, encoded, durable=durable)
 
 
 def _read_ipc_request_json(path):
@@ -853,6 +858,9 @@ def _publish_instance_manifest(activity=False, stopped=False):
     except Exception:
         loaded = False
         capture_path = ""
+    # This is replaceable process-discovery telemetry, not a saved project or edit.
+    # EID selection delivers two activity callbacks on Qt; fsync here needlessly
+    # waits for storage twice before the current image can finish publishing.
     _atomic_write_json(INSTANCE_FILE, {
         "schema": "replaylab-bridge-instance/v1",
         "instanceId": INSTANCE_ID,
@@ -871,7 +879,7 @@ def _publish_instance_manifest(activity=False, stopped=False):
         # unauthenticated HTTP health endpoint.
         "capturePath": capture_path,
         "stopped": bool(stopped),
-    })
+    }, durable=os.environ.get("RENDERDOC_UI_DURABLE_DISCOVERY_MANIFEST") == "1")
 
 
 def _find_replaylab_host():
@@ -1847,6 +1855,13 @@ CONSOLE_QUIET_REQUEST_METHODS = frozenset((
     "poll_rdc_project_shader_resource_index",
 ))
 
+# Console presentation is separate from tool execution and the Agent's tool audit. Repeated
+# inspection queries otherwise append two rows each and rebuild a growing Qt tree throughout
+# long AI jobs. Keep the first pair and periodic progress; errors and all mutation logs remain.
+CONSOLE_THROTTLED_READ_METHODS = frozenset(("get_pipeline_state", "get_shader_info"))
+_console_read_log_times = {}
+_console_read_log_lock = threading.Lock()
+
 class _ReplayLabBackgroundPreempted(BaseException):
     """Control-flow signal that ordinary tool error recovery must not swallow."""
     pass
@@ -2273,7 +2288,20 @@ def _select_event_for_read(ctrl, event_id):
 
 
 def _console_request_lifecycle_visible(method):
-    return str(method or "") not in CONSOLE_QUIET_REQUEST_METHODS
+    value = str(method or "")
+    if value in CONSOLE_QUIET_REQUEST_METHODS:
+        return False
+    if (value not in CONSOLE_THROTTLED_READ_METHODS or
+            os.environ.get("RENDERDOC_UI_DISABLE_READ_LOG_THROTTLE") == "1"):
+        return True
+    now = time.monotonic()
+    session = str(_capture_session_id or "")
+    with _console_read_log_lock:
+        previous = _console_read_log_times.get(value)
+        if previous is not None and previous[0] == session and 0 <= now - previous[1] < 10.0:
+            return False
+        _console_read_log_times[value] = (session, now)
+    return True
 
 
 def _publish_console_event(module, severity, message, phase="", code="",

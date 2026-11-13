@@ -37,6 +37,7 @@ class PipelineStateViewer;
 class QXmlStreamWriter;
 
 class QToolButton;
+class QTimer;
 class QMenu;
 class RDLabel;
 class RDTreeWidgetItem;
@@ -103,6 +104,7 @@ public:
   void OnCaptureClosed() override;
   void OnSelectedEventChanged(uint32_t eventId) override {}
   void OnEventChanged(uint32_t eventId) override;
+  void OnScrubEvent(uint32_t eventId) override;
 
   QVariant persistData();
   void setPersistData(const QVariant &persistData);
@@ -138,6 +140,11 @@ private:
   void showEvent(QShowEvent *event) override;
 
   Ui::PipelineStateViewer *ui;
+  QTimer *m_DetailsTimer = NULL;
+  bool m_DetailsPending = false;
+  QLabel *m_DetailsNotice = NULL;
+  QString m_PreviousToolTip;
+  void DeferDetails();
   ICaptureContext &m_Ctx;
 
   QMenu *editMenus[NumShaderStages] = {};

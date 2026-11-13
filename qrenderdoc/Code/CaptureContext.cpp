@@ -2009,6 +2009,17 @@ void CaptureContext::SetEventID(const rdcarray<ICaptureViewer *> &exclude, uint3
   uint32_t prevEventID = m_EventID;
 
   const uint64_t epoch = m_ScrubEpoch.load();
+  const uint64_t navigation = m_ScrubGeneration.load();
+  // SetEventID also runs on the capture-loading worker before viewers receive OnCaptureLoaded.
+  // Cancel old input state on the GUI thread without selecting rows or touching their models.
+  GUIInvoke::call(m_MainWindow, [this, epoch, navigation]() {
+    if(epoch != m_ScrubEpoch.load() || navigation != m_ScrubGeneration.load())
+      return;
+    if(m_EventBrowser)
+      m_EventBrowser->CancelReplayNavigation();
+    if(m_TimelineBar)
+      m_TimelineBar->CancelReplayNavigation();
+  });
   std::atomic<bool> done = {false};
   std::shared_ptr<const PublishedPipelineState> pipeline;
 
@@ -2066,6 +2077,7 @@ void CaptureContext::RefreshStatus()
 
 void CaptureContext::QueueReplayStatusRefresh(bool force)
 {
+  static const bool timing = qEnvironmentVariableIntValue("RENDERDOC_EID_TIMING") == 1;
   if(!IsCaptureLoaded())
     return;
 
@@ -2081,7 +2093,10 @@ void CaptureContext::QueueReplayStatusRefresh(bool force)
     return;
 
   m_StatusRefreshQueued = true;
-  QTimer::singleShot(0, m_MainWindow->Widget(), [this]() {
+  QElapsedTimer refreshTimer;
+  if(timing)
+    refreshTimer.start();
+  QTimer::singleShot(0, m_MainWindow->Widget(), [this, refreshTimer]() {
     m_StatusRefreshQueued = false;
     const uint64_t epoch = m_StatusRefreshEpoch;
     const uint64_t serial = m_StatusRefreshSerial;
@@ -2105,25 +2120,47 @@ void CaptureContext::QueueReplayStatusRefresh(bool force)
     // can contain Python callbacks that need it before this refresh is allowed to run.
     // A unique tag cannot replace a synchronous SetEventID callback waiting on its stack-local
     // completion, or discard an earlier forced refresh when a later snapshot-only one arrives.
-    // i18n-ignore: internal replay callback tag, never shown to the user.
-    m_Replay.AsyncInvoke(lit("replayStatusRefresh-") + QString::number(serial),
-                        [this, epoch, navigation, serial, selectedEventId, eventId, force](IReplayController *r) {
-      if(epoch != m_ScrubEpoch.load() || navigation != m_ScrubGeneration.load())
-        return;
-      r->SetSelectedEventID(selectedEventId);
-      r->SetFrameEvent(eventId, force);
-      const std::shared_ptr<const PublishedPipelineState> pipeline =
-          std::make_shared<PublishedPipelineState>(r);
-      GUIInvoke::call(m_MainWindow, [this, epoch, navigation, serial, selectedEventId, eventId, pipeline]() {
-        if(epoch != m_ScrubEpoch.load() || navigation != m_ScrubGeneration.load() ||
-           serial != m_StatusRefreshSerial ||
-           !IsCaptureLoaded() || m_SelectedEventID != selectedEventId || m_EventID != eventId)
-          return;
-        PublishPipelineState(pipeline);
-        RefreshUIStatus({}, true, true);
-        ScheduleIdleCheckpointMaintenance();
-      });
-    });
+    m_Replay.AsyncInvoke(
+        // i18n-ignore: internal replay callback tag, never shown to the user.
+        lit("replayStatusRefresh-") + QString::number(serial),
+        [this, epoch, navigation, serial, selectedEventId, eventId, force,
+         refreshTimer](IReplayController *r) {
+          if(epoch != m_ScrubEpoch.load() || navigation != m_ScrubGeneration.load())
+            return;
+          r->SetSelectedEventID(selectedEventId);
+          r->SetFrameEvent(eventId, force);
+          const std::shared_ptr<const PublishedPipelineState> pipeline =
+              std::make_shared<PublishedPipelineState>(r);
+          GUIInvoke::call(m_MainWindow, [this, epoch, navigation, serial, selectedEventId, eventId,
+                                         pipeline, refreshTimer]() {
+            if(epoch != m_ScrubEpoch.load() || navigation != m_ScrubGeneration.load() ||
+               serial != m_StatusRefreshSerial || !IsCaptureLoaded() ||
+               m_SelectedEventID != selectedEventId || m_EventID != eventId)
+              return;
+            PublishPipelineState(pipeline);
+            RefreshUIStatus({}, true, true);
+            ScheduleIdleCheckpointMaintenance();
+            // Profiling completion follows the viewers' queued output work. A source-save notice
+            // alone does not mean that the changed shader has reached the texture display.
+            if(timing)
+              m_Replay.AsyncInvoke([this, epoch, navigation, serial, eventId,
+                                    refreshTimer](IReplayController *) {
+                InvokeAfterPresentation(
+                    eventId, [this, epoch, navigation, serial, eventId, refreshTimer]() {
+                      const bool published = IsCaptureLoaded() && epoch == m_ScrubEpoch.load() &&
+                                             navigation == m_ScrubGeneration.load() &&
+                                             serial == m_StatusRefreshSerial && eventId == m_EventID;
+                      const double totalMS = refreshTimer.nsecsElapsed() / 1.0e6;
+                      LogEIDTiming(QString::asprintf(
+                          // i18n-ignore: opt-in native completion profiling fields, not UI labels.
+                          "status refresh: event=%u serial=%llu nativeTotal=%.6f "
+                          "finish_clock_ms=%.6f published=%u",
+                          eventId, (unsigned long long)serial, totalMS,
+                          refreshTimer.msecsSinceReference() + totalMS, published ? 1U : 0U));
+                    });
+              });
+          });
+        });
   });
 }
 
@@ -2322,24 +2359,23 @@ void CaptureContext::RefreshReplayStatus(uint32_t expectedEventId,
                request, clock, queueMS, snapshotMS, notifyMS](IReplayController *r) {
                 const bool valid = r->GetCurrentEventID() == expectedEventId &&
                                    r->GetSharedBufferPatchGeneration() == expectedBufferGeneration;
-                GUIInvoke::call(m_MainWindow,
-                                [this, epoch, serial, expectedEventId, request, valid, clock,
-                                  queueMS, snapshotMS, notifyMS]() {
-                                  const bool published = m_ReplayStatusPublications.Current(request) &&
-                                                         valid && epoch == m_ScrubEpoch.load() &&
-                                                         IsCaptureLoaded() &&
-                                                         CurEvent() == expectedEventId &&
-                                                         serial == m_PipelinePublicationSerial;
-                                  if(published)
-                                    ScheduleIdleCheckpointMaintenance();
-                                  if(timing)
-                                    LogEIDTiming(QString::asprintf(
-                                        "api=UI op=cbuffer_publication event=%u queue_ms=%.3f "
-                                        "snapshot_ms=%.3f notify_ms=%.3f total_ms=%.3f published=%u",
-                                        expectedEventId, queueMS, snapshotMS, notifyMS,
-                                        clock.nsecsElapsed() / 1.0e6, published ? 1U : 0U));
-                                  m_ReplayStatusPublications.Complete(request, published);
-                                });
+                InvokeAfterPresentation(
+                    expectedEventId, [this, epoch, serial, expectedEventId, request, valid, clock,
+                                      queueMS, snapshotMS, notifyMS]() {
+                      const bool published = m_ReplayStatusPublications.Current(request) && valid &&
+                                             epoch == m_ScrubEpoch.load() && IsCaptureLoaded() &&
+                                             CurEvent() == expectedEventId &&
+                                             serial == m_PipelinePublicationSerial;
+                      if(published)
+                        ScheduleIdleCheckpointMaintenance();
+                      if(timing)
+                        LogEIDTiming(QString::asprintf(
+                            "api=UI op=cbuffer_publication event=%u queue_ms=%.3f "
+                            "snapshot_ms=%.3f notify_ms=%.3f total_ms=%.3f published=%u",
+                            expectedEventId, queueMS, snapshotMS, notifyMS,
+                            clock.nsecsElapsed() / 1.0e6, published ? 1U : 0U));
+                      m_ReplayStatusPublications.Complete(request, published);
+                    });
               });
         });
       });
@@ -2357,7 +2393,9 @@ void CaptureContext::ScrubToSelectedEvent(uint32_t selectedEventId, uint32_t eve
     return;
 
   eventId = qMin(eventId, m_LastAction->eventId);
-  selectedEventId = qMin(selectedEventId, m_LastAction->eventId);
+  // Synthetic pass markers have selected IDs above the final captured action. Their replay
+  // endpoint is a real child EID, but clamping the row ID selects an unrelated final event.
+  // Keep the same selected/effective distinction as SetEventID.
 
   // Repeated pointer samples within one event are not new navigation. Edits use RefreshStatus /
   // forced SetEventID and therefore still replay even when the selected event does not change.
@@ -2373,6 +2411,18 @@ void CaptureContext::ScrubToSelectedEvent(uint32_t selectedEventId, uint32_t eve
   m_ScrubSelectedEventID = selectedEventId;
   m_ScrubEventID = eventId;
   ++m_ScrubGeneration;
+
+  // Navigation controls acknowledge input immediately. CurEvent and the owned pipeline stay
+  // on the completed replay until QueueScrubReplay publishes the new frame.
+  const uint64_t inputGeneration = m_ScrubGeneration.load();
+  const uint64_t inputEpoch = m_ScrubEpoch.load();
+  if(m_EventBrowser)
+    m_EventBrowser->OnReplayNavigationRequested(selectedEventId, eventId);
+  if(m_TimelineBar)
+    m_TimelineBar->OnReplayNavigationRequested(eventId);
+  if(!IsCaptureLoaded() || inputEpoch != m_ScrubEpoch.load() ||
+     inputGeneration != m_ScrubGeneration.load())
+    return;
 
   if(startingScrub)
   {
@@ -2423,13 +2473,16 @@ void CaptureContext::QueueScrubReplay()
     const std::shared_ptr<const PublishedPipelineState> pipeline =
         std::make_shared<PublishedPipelineState>(r);
     const qint64 replayNS = eidTiming ? replayTimer.nsecsElapsed() : 0;
+    const qint64 replayFinishNS = eidTiming ? enqueueTimer.nsecsElapsed() : 0;
 
     // Do not wait for this closure on the replay thread. Some OnEventChanged handlers issue
     // BlockInvoke calls, so waiting here would deadlock the GUI and the replay thread.
     GUIInvoke::call(m_MainWindow, [this, selectedEventId, eventId, generation, epoch, pipeline,
-                                  waitNS, replayNS]() {
+                                   waitNS, replayNS, replayFinishNS, enqueueTimer]() {
       if(epoch != m_ScrubEpoch.load() || !IsCaptureLoaded())
         return;
+
+      const qint64 guiDeliveryNS = eidTiming ? enqueueTimer.nsecsElapsed() - replayFinishNS : 0;
 
       // Releasing input must leave Qt's cursor at the final requested row. An older in-flight
       // replay can finish after EndScrub; publishing it would pull the row backwards before
@@ -2444,7 +2497,11 @@ void CaptureContext::QueueScrubReplay()
 
       m_SelectedEventID = selectedEventId;
       m_EventID = eventId;
+      QElapsedTimer publicationTimer;
+      if(eidTiming)
+        publicationTimer.start();
       PublishPipelineState(pipeline);
+      const qint64 publicationNS = eidTiming ? publicationTimer.nsecsElapsed() : 0;
 
       QElapsedTimer panelTimer;
       if(eidTiming)
@@ -2461,38 +2518,48 @@ void CaptureContext::QueueScrubReplay()
       m_Replay.AsyncInvoke(
           lit("replayInteractiveCommit"),    // i18n-ignore: Internal replay-queue tag.
           [this, selectedEventId, eventId, generation, epoch, waitNS, replayNS, panelNS,
-           panelTimer](IReplayController *) {
-            GUIInvoke::call(m_MainWindow, [this, selectedEventId, eventId, generation, epoch, waitNS,
-                                          replayNS, panelNS, panelTimer]() {
-              if(epoch != m_ScrubEpoch.load() || !IsCaptureLoaded())
-                return;
+           guiDeliveryNS, publicationNS, panelTimer, enqueueTimer](IReplayController *) {
+            InvokeAfterPresentation(
+                eventId,
+                [this, selectedEventId, eventId, generation, epoch, waitNS, replayNS, panelNS,
+                 guiDeliveryNS, publicationNS, panelTimer, enqueueTimer]() {
+                  if(epoch != m_ScrubEpoch.load() || !IsCaptureLoaded() || m_EventID != eventId)
+                    return;
 
-              const qint64 displayNS = eidTiming ? panelTimer.nsecsElapsed() - panelNS : 0;
-              if(eidTiming)
-              {
-                LogEIDTiming(QString::asprintf(
-                    "preview EID %u: queueWait %.2fms, replay %.2fms, generation %llu, state %s",
-                    (unsigned)eventId, waitNS / 1.0e6, replayNS / 1.0e6,
-                    (unsigned long long)generation, m_Scrubbing ? "dragging" : "released"));
-                LogEIDTiming(QString::asprintf(
-                    "scrub EID %u: queueWait %.2fms, replay %.2fms, scrubPanels %.2fms, generation %llu, displayAndReads %.2fms",
-                    (unsigned)eventId, waitNS / 1.0e6, replayNS / 1.0e6, panelNS / 1.0e6,
-                    (unsigned long long)generation, displayNS / 1.0e6));
-                if(!m_Scrubbing)
-                  LogEIDTiming(QString::asprintf(
-                      "commit EID %u: queueWait %.2fms, replay/pipeline %.2fms, panels %.2fms, generation %llu, displayAndReads %.2fms",
-                      (unsigned)eventId, waitNS / 1.0e6, replayNS / 1.0e6, panelNS / 1.0e6,
-                      (unsigned long long)generation, displayNS / 1.0e6));
-              }
+                  const qint64 displayNS = eidTiming ? panelTimer.nsecsElapsed() - panelNS : 0;
+                  if(eidTiming)
+                  {
+                    LogEIDTiming(QString::asprintf(
+                        "preview EID %u: queueWait %.2fms, replay %.2fms, generation %llu, state "
+                        "%s",
+                        (unsigned)eventId, waitNS / 1.0e6, replayNS / 1.0e6,
+                        (unsigned long long)generation, m_Scrubbing ? "dragging" : "released"));
+                    LogEIDTiming(QString::asprintf(
+                        "scrub EID %u: queueWait %.2fms, replay %.2fms, scrubPanels %.2fms, "
+                        "generation %llu, displayAndReads %.2fms",
+                        (unsigned)eventId, waitNS / 1.0e6, replayNS / 1.0e6, panelNS / 1.0e6,
+                        (unsigned long long)generation, displayNS / 1.0e6));
+                    if(!m_Scrubbing && generation == m_ScrubGeneration.load())
+                      LogEIDTiming(QString::asprintf(
+                          // i18n-ignore: opt-in native completion timing; excludes fixture polling.
+                          "commit EID %u: queueWait %.2fms, replay/pipeline %.2fms, panels %.2fms, "
+                          "generation %llu, displayAndReads %.2fms, nativeTotal %.3fms, "
+                          "guiDelivery %.3fms, publishState %.3fms",
+                          (unsigned)eventId, waitNS / 1.0e6, replayNS / 1.0e6, panelNS / 1.0e6,
+                          (unsigned long long)generation, displayNS / 1.0e6,
+                          enqueueTimer.nsecsElapsed() / 1.0e6, guiDeliveryNS / 1.0e6,
+                          publicationNS / 1.0e6));
+                  }
 
-              m_ScrubInFlight = false;
-              m_ScrubCommitPending = generation != m_ScrubGeneration.load();
-              QueueScrubReplay();
-              if(!m_ScrubInFlight && !m_ScrubCommitPending && m_StatusRefreshDeferred)
-                QueueReplayStatusRefresh(m_StatusRefreshForce);
-              if(!m_Scrubbing && !m_ScrubCommitPending)
-                ScheduleIdleCheckpointMaintenance();
-            });
+                  m_ScrubInFlight = false;
+                  m_ScrubCommitPending = generation != m_ScrubGeneration.load();
+                  QueueScrubReplay();
+                  if(!m_ScrubInFlight && !m_ScrubCommitPending && m_StatusRefreshDeferred)
+                    QueueReplayStatusRefresh(m_StatusRefreshForce);
+                  if(!m_Scrubbing && !m_ScrubCommitPending)
+                    ScheduleIdleCheckpointMaintenance();
+                },
+                generation);
           });
     });
   });
@@ -2507,6 +2574,21 @@ void CaptureContext::EndScrub()
     QueueReplayStatusRefresh(m_StatusRefreshForce);
   if(!m_ScrubInFlight && !m_ScrubCommitPending)
     ScheduleIdleCheckpointMaintenance();
+}
+
+void CaptureContext::InvokeAfterPresentation(uint32_t eventId, std::function<void()> completed,
+                                             uint64_t scrubGeneration)
+{
+  GUIInvoke::call(m_MainWindow, [this, eventId, completed, scrubGeneration]() {
+    // Superseded previews must release the single in-flight cycle even if their display was
+    // cancelled. Only the final released generation is a full presentation completion.
+    if(scrubGeneration && (m_Scrubbing || scrubGeneration != m_ScrubGeneration.load()))
+      completed();
+    else if(m_TextureViewer)
+      m_TextureViewer->WhenPresentationReady(eventId, completed);
+    else
+      completed();
+  });
 }
 
 void CaptureContext::ScheduleIdleCheckpointMaintenance(int delayMS)
@@ -2586,6 +2668,13 @@ void CaptureContext::LogEIDTiming(const QString &line)
     logFile->write((line + lit("\n")).toUtf8());
     logFile->flush();
   }
+}
+
+void CaptureContext::CancelReplayBackgroundWork()
+{
+  ++m_IdleCheckpointGeneration;
+  if(m_TextureViewer)
+    m_TextureViewer->CancelReplayBackgroundWork();
 }
 
 void CaptureContext::ConnectToRemoteServer(RemoteHost host)
@@ -2713,6 +2802,7 @@ CBufferDebugDisplaySource CaptureContext::GetCBufferDebugDisplaySource(
 void CaptureContext::RefreshUIStatus(const rdcarray<ICaptureViewer *> &exclude,
                                      bool updateSelectedEvent, bool updateEvent)
 {
+  static const bool eidTiming = qEnvironmentVariableIntValue("RENDERDOC_EID_TIMING") == 1;
   const uint64_t refreshEpoch = m_ScrubEpoch.load();
   // Keep this publication alive if a viewer synchronously publishes another event. The epoch
   // checks below then stop the old notification pass without invalidating that viewer's locals.
@@ -2735,6 +2825,9 @@ void CaptureContext::RefreshUIStatus(const rdcarray<ICaptureViewer *> &exclude,
     if(!viewer || exclude.contains(viewer) || !m_CaptureViewers.contains(viewer))
       continue;
 
+    QElapsedTimer viewerTimer;
+    if(eidTiming)
+      viewerTimer.start();
     if(updateSelectedEvent)
       viewer->OnSelectedEventChanged(m_SelectedEventID);
     // Extension viewers may navigate, close the capture, or unregister themselves synchronously.
@@ -2743,6 +2836,18 @@ void CaptureContext::RefreshUIStatus(const rdcarray<ICaptureViewer *> &exclude,
       return;
     if(updateEvent && m_CaptureViewers.contains(viewer))
       viewer->OnEventChanged(m_EventID);
+    if(eidTiming)
+    {
+      const char *name = viewer == m_EventBrowser     ? "events"
+                         : viewer == m_TextureViewer  ? "texture"
+                         : viewer == m_PipelineViewer ? "pipeline"
+                         : viewer == m_APIInspector   ? "apiInspector"
+                         : viewer == m_TimelineBar    ? "timeline"
+                                                      : "other";
+      // i18n-ignore: opt-in per-viewer timing diagnostic, never a UI label.
+      LogEIDTiming(QString::asprintf("panel EID %u: viewer=%s duration_ms=%.3f", m_EventID, name,
+                                     viewerTimer.nsecsElapsed() / 1.0e6));
+    }
     if(refreshEpoch != m_ScrubEpoch.load() || !IsCaptureLoaded())
       return;
   }
@@ -3692,6 +3797,107 @@ IShaderViewer *CaptureContext::EditShader(ResourceId id, ShaderStage stage, cons
   return viewer;
 }
 
+static bytebuf ReplayComparableDXBC(const bytebuf &bytes)
+{
+  bytebuf result;
+  const auto word = [&bytes](size_t at) {
+    return uint32_t(bytes[at]) | (uint32_t(bytes[at + 1]) << 8) | (uint32_t(bytes[at + 2]) << 16) |
+           (uint32_t(bytes[at + 3]) << 24);
+  };
+  if(bytes.size() < 32 || memcmp(bytes.data(), "DXBC", 4) || word(24) != bytes.size())
+    return result;
+  const uint32_t count = word(28);
+  if(!count || count > 64 || 32U + count * 4U > bytes.size())
+    return result;
+  bool executable = false;
+  rdcarray<rdcpair<size_t, size_t>> ranges;
+  for(uint32_t i = 0; i < count; i++)
+  {
+    const size_t offset = word(32 + i * 4);
+    if(offset < 32U + count * 4U || offset > bytes.size() || bytes.size() - offset < 8)
+      return {};
+    const size_t length = word(offset + 4);
+    if(length > bytes.size() - offset - 8)
+      return {};
+    const size_t end = offset + 8 + length;
+    for(const auto &range : ranges)
+      if(offset < range.second && range.first < end)
+        return {};
+    ranges.push_back({offset, end});
+    const byte *tag = bytes.data() + offset;
+    executable |= !memcmp(tag, "SHDR", 4) || !memcmp(tag, "SHEX", 4);
+    // Keep every interface/root-signature/statistics/unknown chunk. Only debug payloads may carry
+    // nondeterministic PDB identities; their source inputs are checked separately below.
+    if(memcmp(tag, "SDBG", 4) && memcmp(tag, "SPDB", 4))
+      result.append(bytes.data() + offset, end - offset);
+  }
+  if(!executable)
+    result.clear();    // DXIL and unfamiliar containers retain exact-byte comparison.
+  return result;
+}
+
+static bool SameReplayDXBCAndDebugInputs(const ShaderReflection &a, const ShaderReflection &b)
+{
+  if(a.encoding != ShaderEncoding::DXBC || b.encoding != ShaderEncoding::DXBC ||
+     a.debugInfo.files.empty() || a.debugInfo.files != b.debugInfo.files ||
+     a.debugInfo.compileFlags.flags != b.debugInfo.compileFlags.flags ||
+     a.debugInfo.entrySourceName != b.debugInfo.entrySourceName ||
+     !(a.debugInfo.entryLocation == b.debugInfo.entryLocation) ||
+     a.debugInfo.encoding != b.debugInfo.encoding || a.debugInfo.compiler != b.debugInfo.compiler)
+    return false;
+  const bytebuf first = ReplayComparableDXBC(a.rawBytes);
+  return !first.empty() && first == ReplayComparableDXBC(b.rawBytes);
+}
+
+#if ENABLE_UNIT_TESTS
+TEST_CASE("Shader save reuse preserves executable, interface and debug source identity",
+          "[capture-context][shader-save-cache]")
+{
+  ShaderReflection a, b;
+  a.encoding = b.encoding = ShaderEncoding::DXBC;
+  a.debugInfo.files.resize(1);
+  a.debugInfo.files[0].filename = "owned.hlsl";
+  a.debugInfo.files[0].contents = "float4 main():SV_Target{return 1;}";
+  b.debugInfo = a.debugInfo;
+  a.rawBytes.resize(72);
+  memset(a.rawBytes.data(), 0, a.rawBytes.size());
+  memcpy(a.rawBytes.data(), "DXBC", 4);
+  a.rawBytes[24] = 72;
+  a.rawBytes[28] = 3;
+  a.rawBytes[32] = 44;
+  a.rawBytes[36] = 53;
+  a.rawBytes[40] = 62;
+  for(size_t offset : {44U, 53U, 62U})
+    a.rawBytes[offset + 4] = 1;
+  memcpy(a.rawBytes.data() + 44, "SHDR", 4);
+  memcpy(a.rawBytes.data() + 53, "RDEF", 4);
+  memcpy(a.rawBytes.data() + 62, "SPDB", 4);
+  b.rawBytes = a.rawBytes;
+  b.rawBytes[70] = 1;
+  CHECK(SameReplayDXBCAndDebugInputs(a, b));
+  b.rawBytes[52] = 1;
+  CHECK_FALSE(SameReplayDXBCAndDebugInputs(a, b));
+  b.rawBytes = a.rawBytes;
+  b.rawBytes[61] = 1;
+  CHECK_FALSE(SameReplayDXBCAndDebugInputs(a, b));
+  b.rawBytes = a.rawBytes;
+  b.debugInfo.files[0].contents += "// changed source mapping";
+  CHECK_FALSE(SameReplayDXBCAndDebugInputs(a, b));
+  b.debugInfo = a.debugInfo;
+  b.rawBytes[32] = 255;
+  CHECK_FALSE(SameReplayDXBCAndDebugInputs(a, b));
+  b.rawBytes = a.rawBytes;
+  b.debugInfo.files.clear();
+  CHECK_FALSE(SameReplayDXBCAndDebugInputs(a, b));
+  b.debugInfo = a.debugInfo;
+  ShaderCompileFlag flag;
+  flag.name = "@cmdline";
+  flag.value = "/Od";
+  b.debugInfo.compileFlags.flags.push_back(flag);
+  CHECK_FALSE(SameReplayDXBCAndDebugInputs(a, b));
+}
+#endif
+
 void CaptureContext::ApplyShaderEdit(IShaderViewer *viewer, ResourceId id, ShaderStage stage,
                                      ShaderEncoding shaderEncoding, ShaderCompileFlags flags,
                                      const rdcstr &entryFunc, const bytebuf &shaderBytes)
@@ -3702,17 +3908,53 @@ void CaptureContext::ApplyShaderEdit(IShaderViewer *viewer, ResourceId id, Shade
   ANALYTIC_SET(UIFeatures.ShaderEditing, true);
 
   QPointer<QObject> ptr(viewer->Widget());
+  static const bool timing = qEnvironmentVariableIntValue("RENDERDOC_EID_TIMING") == 1;
+  QElapsedTimer inputTimer;
+  if(timing)
+    inputTimer.start();
 
   // invoke off to the ReplayController to replace the capture's shader
   // with our edited one
-  Replay().AsyncInvoke([this, entryFunc, shaderBytes, shaderEncoding, flags, stage, id, ptr,
-                        viewer](IReplayController *r) {
+  Replay().AsyncInvoke([this, entryFunc, shaderBytes, shaderEncoding, flags, stage, id, ptr, viewer,
+                        inputTimer](IReplayController *r) {
     rdcstr errs;
+    const double queueMS = timing ? inputTimer.nsecsElapsed() / 1000000.0 : 0.0;
+    QElapsedTimer workTimer;
+    if(timing)
+      workTimer.start();
 
     ResourceId from = id;
     ResourceId to;
 
     rdctie(to, errs) = r->BuildTargetShader(entryFunc, shaderEncoding, shaderBytes, flags, stage);
+    const double compileMS = timing ? workTimer.nsecsElapsed() / 1000000.0 : 0.0;
+    const bool compiled = to != ResourceId();
+    bool reused = false;
+
+    if(to != ResourceId() && (APIProps().pipelineType == GraphicsAPI::Vulkan ||
+                              APIProps().pipelineType == GraphicsAPI::D3D12))
+    {
+      const ResourceId previous = r->GetTargetShaderReplacement(from);
+      if(previous != ResourceId() && previous != to)
+      {
+        const ShaderEntryPoint entry(entryFunc, stage);
+        const ShaderReflection *active = r->GetShader(ResourceId(), previous, entry);
+        const ShaderReflection *candidate = r->GetShader(ResourceId(), to, entry);
+        if(active && candidate && !active->rawBytes.empty() &&
+           (active->rawBytes == candidate->rawBytes ||
+            (APIProps().pipelineType == GraphicsAPI::D3D12 &&
+             SameReplayDXBCAndDebugInputs(*active, *candidate))))
+        {
+          // Compilation still observes all current source/includes/options. Byte-identical
+          // immutable modules can retain the admitted live target and its derived pipelines.
+          // Release only this new build; the previous target may belong to a project/debug owner.
+          r->FreeTargetResource(to);
+          to = previous;
+          reused = true;
+        }
+      }
+    }
+    const double compareEndMS = timing ? workTimer.nsecsElapsed() / 1000000.0 : 0.0;
 
     if(to == ResourceId())
     {
@@ -3770,8 +4012,21 @@ void CaptureContext::ApplyShaderEdit(IShaderViewer *viewer, ResourceId id, Shade
                         [this, from, to]() { RegisterReplacement(from, to); });
       }
     }
+    const double nativeMS = timing ? workTimer.nsecsElapsed() / 1000000.0 : 0.0;
     if(ptr)
-      GUIInvoke::call(ptr, [viewer, errs]() { viewer->ShowErrors(errs); });
+      GUIInvoke::call(ptr, [this, viewer, errs, inputTimer, queueMS, compileMS, compareEndMS,
+                            nativeMS, compiled, reused]() {
+        viewer->ShowErrors(errs);
+        if(timing)
+          LogEIDTiming(QString::asprintf(
+              // i18n-ignore: opt-in profiling fields for native shader-save stages, not UI labels.
+              "shader save: queue_ms=%.6f compile_ms=%.6f compare_ms=%.6f mutation_ms=%.6f "
+              "native_ms=%.6f input_to_notice_ms=%.6f input_clock_ms=%lld compiled=%u "
+              "reused_target=%u",
+              queueMS, compileMS, compareEndMS - compileMS, nativeMS - compareEndMS, nativeMS,
+              inputTimer.nsecsElapsed() / 1000000.0, inputTimer.msecsSinceReference(),
+              compiled ? 1U : 0U, reused ? 1U : 0U));
+      });
   });
 }
 
