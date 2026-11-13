@@ -625,6 +625,7 @@ to compare a replacement with conservative replay.
 repeats compile/apply/debug/rollback and real IPC reflection reads. A small fixture
 may use `--skip-descriptor-scan --no-timing`; this excludes million-entry descriptor
 coverage and reports that limit. Check post-warmup private bytes/handles as well
+as `--unique-shader-variants` when measuring distinct compiled programs, as well
 as exact restoration on deterministic fixtures. A stable bounded run does not
 prove every capture and every future operation leak free.
 

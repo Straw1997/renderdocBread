@@ -1033,7 +1033,9 @@ class ApplicationAudit(object):
                     raise RuntimeError('Owned fixture CBuffer bytes were not restored')
                 source = b'cbuffer Params:register(b0){float4 Tint;} float4 PSMain(float4 p:SV_Position):SV_Target0{return Tint.bgra;}'
                 if 'variant' in command:
-                    scale = 0.5 + (int(command['variant']) % 17) / 64.0
+                    variant = int(command['variant'])
+                    scale = (0.5 + (variant % 4096) / 8192.0 if command.get('uniqueShaderVariants')
+                             else 0.5 + (variant % 17) / 64.0)
                     source = ('cbuffer Params:register(b0){float4 Tint;} float4 PSMain(float4 p:SV_Position):SV_Target0{return Tint.bgra * %.6f;}' % scale).encode('ascii')
                 if command.get('invalidCompile'):
                     invalid, error = ctrl.BuildTargetShader('PSMain', rd.ShaderEncoding.HLSL,

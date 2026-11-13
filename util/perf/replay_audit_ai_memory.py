@@ -15,6 +15,8 @@ parser.add_argument('--heap-trace',action='store_true')
 parser.add_argument('--no-timing',action='store_true')
 parser.add_argument('--skip-descriptor-scan',action='store_true',
                     help='Use a non-million-heap fixture; descriptor-page coverage is excluded')
+parser.add_argument('--unique-shader-variants', action='store_true',
+                    help='Compile up to 4096 distinct Shader variants instead of cycling 17')
 args=parser.parse_args()
 audit=AuditRun(args.label,args.runtime,timing=not args.no_timing)
 audit.generic_capture=True
@@ -48,7 +50,8 @@ try:
     for batch in range(args.batches):
         for cycle in range(args.cycles):
             name='mutation-%d-%d'%(batch,cycle)
-            result=audit.command(name,'native_reuse_mutations',variant=batch*args.cycles+cycle,invalidCompile=True,borrowedBuild=True)
+            result=audit.command(name,'native_reuse_mutations',variant=batch*args.cycles+cycle,
+                invalidCompile=True,borrowedBuild=True,uniqueShaderVariants=args.unique_shader_variants)
             assert result['before']['textures']==reference['textures']
             # Exercise the actual file-IPC tool dispatch and native reflection read path.
             state=client.call('get_pipeline_state',{'event_id':event},timeout=20)
