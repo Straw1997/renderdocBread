@@ -2120,8 +2120,8 @@ void CaptureContext::QueueReplayStatusRefresh(bool force)
     // can contain Python callbacks that need it before this refresh is allowed to run.
     // A unique tag cannot replace a synchronous SetEventID callback waiting on its stack-local
     // completion, or discard an earlier forced refresh when a later snapshot-only one arrives.
-    // i18n-ignore: internal replay callback tag, never shown to the user.
     m_Replay.AsyncInvoke(
+        // i18n-ignore: internal replay callback tag, never shown to the user.
         lit("replayStatusRefresh-") + QString::number(serial),
         [this, epoch, navigation, serial, selectedEventId, eventId, force,
          refreshTimer](IReplayController *r) {

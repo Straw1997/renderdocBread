@@ -102,7 +102,7 @@ class AuditRun:
             for name in ('RenderDocBread.exe', 'renderdoc.dll')]
         config = {'rdocConfigData': 1, 'Analytics_TotalOptOut': True,
                   'CheckUpdate_AllowChecks': False, 'Tips_HasSeenFirst': True,
-                  'AlwaysLoad_Extensions': []}
+                  'AlwaysLoad_Extensions': [], 'AlwaysReplayLocally': True}
         if profile == self.directory:
             write_json(self.directory / 'config' / 'UI.config', config)
         if profile == self.directory and getattr(self, 'profile_template', None):

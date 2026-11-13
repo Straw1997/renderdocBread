@@ -1245,8 +1245,8 @@ void TextureViewer::QueueNativeThumbnailRefresh()
   if(request.thumbnails.empty())
     return;
   QPointer<TextureViewer> self(this);
-  // i18n-ignore: coalesced native-preview expose/resize queue; not a new main-image request.
   m_Ctx.Replay().AsyncInvoke(
+      // i18n-ignore: coalesced native-preview expose/resize queue; not a new main-image request.
       lit("TextureViewerNativeThumbnails"), [self, request](IReplayController *r) {
         if(self && self->IsCurrentViewRequest(request) && r->GetCurrentEventID() == request.eventId)
           self->RT_UpdateNativeThumbnails(r, request);
@@ -1393,8 +1393,8 @@ void TextureViewer::CaptureThumbnailWitnesses()
   {
     // i18n-ignore: opt-in pixel evidence fields, never user-facing labels.
     values.push_back(QVariantMap{
-        {lit("resource"),
-         ToQStr(witness.resource)},       // i18n-ignore: diagnostic resource identity key.
+        {lit("resource"),    // i18n-ignore: diagnostic resource identity key.
+         ToQStr(witness.resource)},
         {lit("event"), eventId},          // i18n-ignore: diagnostic event ID key.
         {lit("image"), witness.image},    // i18n-ignore: diagnostic image key.
         {lit("mip"), witness.preview->property("mip")},        // i18n-ignore: diagnostic mip key.
