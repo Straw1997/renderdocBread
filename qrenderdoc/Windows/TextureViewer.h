@@ -54,6 +54,7 @@ class QSplitter;
 class RenderTargetHistoryView;
 class QStackedWidget;
 class AITextureAnnotation;
+class QTimer;
 
 struct Following
 {
@@ -142,6 +143,8 @@ private:
   };
 
 public:
+  // Internal GUI-thread completion: includes a replacement display queued by a late resize.
+  void WhenPresentationReady(uint32_t eventId, std::function<void()> completed);
   explicit TextureViewer(ICaptureContext &ctx, QWidget *parent = 0);
   ~TextureViewer();
 
@@ -277,6 +280,17 @@ private:
   void CloseAIAnnotation();
   struct ViewRequest
   {
+    struct ThumbnailBinding
+    {
+      WindowingData window;
+      QPointer<ResourcePreview> preview;
+      QSize size;
+      ResourceId resource;
+      Subresource subresource;
+      CompType typeCast = CompType::Typeless;
+      bool depth = false;
+    };
+    rdcarray<ThumbnailBinding> thumbnails;
     TextureDisplay display;
     TextureDescription texture;
     QPoint pickedPoint, hoverPixel;
@@ -296,7 +310,21 @@ private:
   void RT_UpdateVisualRange(IReplayController *, const ViewRequest &request);
   void SuspendTexturePresentation();
   Q_SLOT void CapturePresentationWitness();
+  Q_SLOT void CaptureThumbnailWitnesses();
   void QueueUpdateAndDisplay(bool updateAnalysis = false);
+  void RT_ExecuteDisplayRequest(IReplayController *r, const ViewRequest &request,
+                                bool updateAnalysis);
+  void CaptureNativeThumbnailBindings(ViewRequest &request);
+  void QueueNativeThumbnailRefresh();
+  void QueueDeferredAnalysis();
+public:
+  void CancelReplayBackgroundWork();
+private:
+  QTimer *m_AnalysisTimer = NULL;
+  bool m_AnalysisPending = false;
+  // Replay-thread owned outputs, reused by widget identity until capture close.
+  std::map<ResourcePreview *, IReplayOutput *> m_NativeThumbnailOutputs;
+  void RT_UpdateNativeThumbnails(IReplayController *r, const ViewRequest &request);
   void QueuePickPixelsAndUpdate(bool hover = false);
   void QueueUpdateVisualRange();
   uint32_t ActiveRenderTargetHistoryEvent() const;
@@ -425,6 +453,9 @@ private:
   std::atomic<uint64_t> m_EventRequestSerial = {0};
   bool m_PresentationSuspended = false;
   bool m_PresentationPending = false;
+  uint64_t m_CompletedDisplayRequestSerial = 0;
+  std::vector<std::function<void()>> m_PresentationWaiters;
+  void CompletePresentationWaiters();
   bool m_UpdatingTextureState = false;
   bool m_RetargetingRenderTargetHistory = false;
 

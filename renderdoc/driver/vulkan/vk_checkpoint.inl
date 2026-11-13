@@ -343,6 +343,7 @@ void WrappedVulkan::DestroyReplayCheckpoint(ReplayCheckpoint *checkpoint)
 
 void WrappedVulkan::InvalidateReplayCheckpoints(uint32_t firstAffectedEvent)
 {
+  ClearDecodedDescriptorWrites();
   InvalidateLiveForward("checkpointOrResourceEditInvalidated");
   m_CheckpointResidentVersions.clear();
   if(firstAffectedEvent == 0)

@@ -171,6 +171,23 @@ SWIGPY_DESTRUCTOR_CLOSURE(capviewer_deinit) /* defines capviewer_deinit_destruct
 
 %include <stdint.i>
 
+// SetEventID waits for the replay queue. An earlier Python replay callback must be
+// able to acquire the GIL while it waits, otherwise neither callback can finish.
+// Keep conversion/ownership under the GIL and preserve the native UI-thread contract.
+// Python capture-viewer notifications reacquire the GIL through ScopedFuncCall.
+%exception ICaptureContext::SetEventID {
+  struct ScopedSelectionGILRelease
+  {
+    ScopedSelectionGILRelease() : state(PyEval_SaveThread()) {}
+    ~ScopedSelectionGILRelease() noexcept { PyEval_RestoreThread(state); }
+    PyThreadState *state;
+  };
+  {
+    ScopedSelectionGILRelease release;
+    $action
+  }
+}
+
 %include "Code/Interface/QRDInterface.h"
 %include "Code/Interface/PersistentConfig.h"
 %include "Code/Interface/RemoteHost.h"

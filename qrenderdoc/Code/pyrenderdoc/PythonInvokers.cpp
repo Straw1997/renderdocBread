@@ -1741,6 +1741,10 @@ struct CaptureContextInvoker : public UIThreadInvoker<ICaptureContext>
     InvokeVoidFunction(&ICaptureContext::SetEventID, exclude, selectedEventID, eventId, force);
   }
   virtual void RefreshStatus() override { InvokeVoidFunction(&ICaptureContext::RefreshStatus); }
+  void CancelReplayBackgroundWork() override
+  {
+    InvokeVoidFunction(&ICaptureContext::CancelReplayBackgroundWork);
+  }
   virtual bool IsResourceReplaced(ResourceId id) override
   {
     return InvokeRetFunction<bool>(&ICaptureContext::IsResourceReplaced, id);

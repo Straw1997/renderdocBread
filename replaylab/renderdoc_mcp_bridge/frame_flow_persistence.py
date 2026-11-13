@@ -224,11 +224,20 @@ def _bounded(path, maximum):
     path = _ordinary(path)
     if not path.is_file() or not 0 < path.stat().st_size <= maximum:
         raise ValueError("Frame diagram file exceeds its supported size")
+    # BufferedReader.read(n) can reserve n bytes before discovering EOF (notably
+    # in the bundled Python 3.6). The 64/96 MiB safety ceilings are not the file
+    # sizes: many tiny previews must not each allocate that entire ceiling.
+    chunks, total = [], 0
     with path.open("rb") as stream:
-        result = stream.read(maximum + 1)
-    if len(result) > maximum:
-        raise ValueError("Frame diagram file changed size while reading")
-    return result
+        while True:
+            chunk = stream.read(min(1024 * 1024, maximum + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > maximum:
+                raise ValueError("Frame diagram file changed size while reading")
+            chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _asset_fields(document):

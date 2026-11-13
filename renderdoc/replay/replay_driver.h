@@ -543,6 +543,13 @@ public:
   // downstream rebuilding to idle maintenance. Ordinary event navigation keeps its full policy.
   // Bypass always takes precedence over this request-local restriction.
   bool m_ReplayCheckpointPrefixOnly = false;
+  // A controller-owned persistent buffer edit can rebuild an original-pipeline write proof
+  // even when its first forced replay deliberately bypasses result checkpoints. Analysis
+  // scopes clear this provenance; it does not authorise cached output or native-list reuse.
+  bool m_ReplayBufferMutationRoot = false;
+  // Checked Shader replacement replay only. A backend must independently prove unchanged
+  // read/write envelopes before retaining dirty-content evidence; this never permits checkpoints.
+  bool m_ReplayShaderMutationRoot = false;
   uint32_t GetReplayControlVersion() const override { return 1; }
   bool ExchangeReplayCheckpointBypass(bool bypass) override
   {

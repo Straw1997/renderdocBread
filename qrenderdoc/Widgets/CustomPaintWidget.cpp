@@ -161,6 +161,11 @@ void CustomPaintWidget::changeEvent(QEvent *event)
 
 void CustomPaintWidget::renderInternal(QPaintEvent *e)
 {
+  if(!m_AutomaticDisplay)
+  {
+    emit displayRequested();
+    return;
+  }
   if(m_Ctx && m_Output && m_Ctx->IsCaptureLoaded())
   {
     QPointer<CustomPaintWidget> me(this);

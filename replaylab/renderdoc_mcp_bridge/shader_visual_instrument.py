@@ -905,13 +905,36 @@ def _normalize_selection(source, byte_start, byte_end, tokens, pairs):
             "line": source.count("\n", 0, begin) + 1, "expression": source[begin:finish]}
 
 
-def normalize_selection(source, byte_start, byte_end=None):
+def prepare_source(source, language="hlsl"):
+    """Build one source-bound lexical model for multiple selections in the same editor."""
+    if language not in {"hlsl", "glsl"} or not isinstance(source, str) or not source or "\0" in source:
+        _fail("unsupported-source-language")
+    if len(source.encode("utf-8")) > 8 * 1024 * 1024:
+        _fail("source-size-limit")
+    if _PREFIX in source:
+        _fail("reserved-debug-identifier")
+    return {"sourceSha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+            "language": language, "model": _parse(source, language)}
+
+
+def _prepared_model(source, prepared, language=None):
+    if (prepared.get("sourceSha256") != hashlib.sha256(source.encode("utf-8")).hexdigest() or
+            (language is not None and prepared.get("language") != language)):
+        _fail("stale-source-plan")
+    return prepared["model"]
+
+
+def normalize_selection(source, byte_start, byte_end=None, prepared=None):
     """Expand a caret/token to its lexical value without parsing unrelated types.
 
     Explicit multi-token expressions retain their selected range. Tolerant
     delimiter matching allows preprocessing to remove inactive source branches.
     """
-    tokens, pairs = _tokens(source, strict=False)
+    if prepared is not None:
+        model = _prepared_model(source, prepared)
+        tokens, pairs = model["tokens"], model["pairs"]
+    else:
+        tokens, pairs = _tokens(source, strict=False)
     return _normalize_selection(source, byte_start, byte_end, tokens, pairs)
 
 
@@ -1012,7 +1035,7 @@ def _validate_expression_subtree(model, start, end):
         _fail("partial-expression-selection")
 
 
-def inspect(source, byte_start, byte_end=None, language="hlsl", entry_point="main"):
+def inspect(source, byte_start, byte_end=None, language="hlsl", entry_point="main", prepared=None):
     """Return a serializable plan bound to exact source bytes and a value access."""
     if language not in {"hlsl", "glsl"} or not isinstance(source, str) or not source or "\0" in source:
         _fail("unsupported-source-language")
@@ -1023,7 +1046,7 @@ def inspect(source, byte_start, byte_end=None, language="hlsl", entry_point="mai
     # Macro-expanded positions have no trustworthy source expression identity.
     # A preprocessed unit with a preserved position map can be passed by a host.
     definitions = set(re.findall(r"(?m)^\s*#\s*define\s+([A-Za-z_]\w*)", source))
-    model = _parse(source, language)
+    model = _prepared_model(source, prepared, language) if prepared is not None else _parse(source, language)
     tokens, pairs = model["tokens"], model["pairs"]
     entries = [f for f in model["functions"] if f["name"] == entry_point]
     if len(entries) != 1:
@@ -1171,6 +1194,30 @@ def _flatten_outputs(model, type_name, path="", depth=0):
 
 def _target_semantic(semantic, index):
     return re.fullmatch(r"(?:SV_Target|COLOR)(%d)?" % index, semantic, re.IGNORECASE) is not None if index == 0 else re.fullmatch(r"(?:SV_Target|COLOR)%d" % index, semantic, re.IGNORECASE) is not None
+
+
+def _position_input(model, type_name, path="", depth=0):
+    """Find a scalar SV_Position input without expanding unrelated input arrays.
+
+    Output flattening has stricter rules because it rewrites the interface. Input
+    structures are passed through unchanged, including legal TEXCOORD arrays.
+    """
+    if depth > 12:
+        _fail("output-expansion-limit")
+    structure = model["structures"].get(_canonical(model, type_name))
+    if structure is None:
+        return None
+    for field in structure["fields"]:
+        if field["array"]:
+            continue
+        field_path = path + "." + field["name"]
+        if field["semantic"].lower() == "sv_position":
+            return field_path
+        if not field["semantic"]:
+            found = _position_input(model, field["type"], field_path, depth + 1)
+            if found is not None:
+                return found
+    return None
 
 
 def _unreached(output_type, components, position=None, language="hlsl"):
@@ -1321,9 +1368,9 @@ def instrument(plan, member="", target=None, mode="raw", range_min=0.0,
             if "out" not in param["qualifiers"]:
                 if param["semantic"].lower() == "sv_position":
                     unmatched_position = param["name"]
-                for field in _flatten_outputs(model, param["type"]):
-                    if field["semantic"].lower() == "sv_position":
-                        unmatched_position = param["name"] + field["path"]
+                position_path = _position_input(model, param["type"])
+                if position_path is not None:
+                    unmatched_position = param["name"] + position_path
         for param in params:
             if "inout" in param["qualifiers"]:
                 _fail("entry-inout-unsupported")

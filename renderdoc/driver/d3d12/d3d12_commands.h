@@ -48,6 +48,8 @@ struct D3D12ExecuteData
   WrappedID3D12CommandSignature *sig = NULL;
   UINT maxCount = 0;
   UINT reservedCount = 0;
+  ResourceId sourceArgs, sourceCount;
+  uint64_t sourceArgsOffset = 0, sourceCountOffset = 0;
   bool countResolved = false;
 };
 
@@ -185,6 +187,7 @@ enum class PreparedReplayRejectReason : uint32_t
   InterleavedReset,
   APICommand,
   IncompleteRange,
+  NativeQueries,
 };
 
 // The native query commands can be retained with a complete command list. Validate paired query
@@ -363,6 +366,7 @@ struct BakedCmdListInfo
       uint32_t first = 0, count = 0;
     };
     uint32_t relativeEvent = 0;
+    bool generatedAddresses = false;
     rdcarray<ReplayResourceRange> direct;
     rdcarray<Table> tables;
   };
@@ -393,6 +397,10 @@ struct BakedCmdListInfo
     // Entire declared SRV/UAV table ranges. Descriptor history, not final heap contents or shader
     // reflection, proves whether a candidate texture could have been referenced at execution.
     rdcarray<ReplayUAVRange> descriptorRanges;
+    // CBV/sampler locations matter for descriptor overwrite hazards, but do not read texture
+    // contents. Keep them separate from the texture-restore dependency proof above.
+    rdcarray<ReplayUAVRange> otherDescriptorRanges;
+    bool unknownDescriptorUses = false;
   };
   rdcarray<ReplayTextureReadOp> replayTextureReadOps;
   uint32_t replayTextureReadEntries = 0;
@@ -723,8 +731,15 @@ struct D3D12CommandData
   struct ReplayPSOUAVProof
   {
     bool complete = false, graphics = false;
+    bool constantBuffersComplete = false;
     const char *reason = "unvalidated";
     rdcarray<ReplayShaderUAVBinding> bindings;
+    struct ConstantBuffer
+    {
+      ShaderStage stage = ShaderStage::Count;
+      uint32_t space = 0, first = 0, count = 0, byteSize = 0;
+    };
+    rdcarray<ConstantBuffer> constantBuffers;
   };
   const ReplayPSOUAVProof &GetReplayPSOUAVProof(ResourceId pipeline);
   std::map<ResourceId, ReplayPSOUAVProof> m_ReplayPSOUAVProofs;
@@ -769,6 +784,8 @@ struct D3D12CommandData
                                                        D3D12_COMMAND_LIST_TYPE type,
                                                        ID3D12PipelineState *initialState,
                                                        bool &reused);
+  bool DescriptorSlotUnusedBefore(ResourceId heap, uint32_t index, uint32_t beforeEvent,
+                                  const char *&reason) const;
   void FinishPreparedCommandList(ResourceId baked, uint64_t chunkEndOffset);
   void ClearPreparedReplayCache();
   bool HasPreparedReplayCache() const { return !m_PreparedCmdLists.empty(); }

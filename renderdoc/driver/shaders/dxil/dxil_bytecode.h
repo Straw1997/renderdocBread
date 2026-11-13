@@ -81,6 +81,7 @@ struct BumpAllocator
   BumpAllocator(size_t totalSize);
   ~BumpAllocator();
   void *alloc(size_t sz);
+  uint64_t GetAllocatedBytes() const;
 
   template <typename T>
   T *alloc()
@@ -93,6 +94,7 @@ private:
   byte *base, *cur;
   rdcarray<byte *> storage;
   size_t m_BlockSize;
+  size_t m_LargeAllocationExtra = 0;
 };
 
 struct ProgramHeader
@@ -1745,6 +1747,10 @@ public:
   const char *GetReplayFiniteRootBindings(rdcarray<ReplayRootBinding> &bindings) const;
 
   static char GetDXILIdentifier(const bool dxcStyle) { return dxcStyle ? '%' : '_'; }
+  uint64_t GetRetainedStorageBytes() const
+  {
+    return alloc.GetAllocatedBytes() + m_Bytes.capacity() + m_Disassembly.capacity();
+  }
 protected:
   void Parse(const DXBC::Reflection *reflection);
   void SettleIDs();

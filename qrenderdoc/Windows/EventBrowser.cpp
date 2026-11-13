@@ -4212,6 +4212,9 @@ void EventBrowser::OnCaptureLoaded()
 
 void EventBrowser::OnCaptureClosed()
 {
+  m_NavigationPending = false;
+  m_NavigationEventID = 0;
+  m_NavigationSelectedEventID = 0;
   ++m_ShaderNavigationGeneration;
   m_ArrowScrubKeys.clear();
 
@@ -4246,12 +4249,38 @@ void EventBrowser::OnEventChanged(uint32_t eventId)
   QScopedValueRollback<bool> updating(m_UpdatingReplaySelection, true);
   // While arrow keys are held the selected row is also Qt's cursor for the next key repeat.
   // Keep that pending input position; the model's current-event marker follows completed replay.
-  if(m_ArrowScrubKeys.isEmpty() && !SelectEvent(m_Ctx.CurSelectedEvent()))
+  if(m_NavigationPending && eventId == m_NavigationEventID &&
+     m_Ctx.CurSelectedEvent() == m_NavigationSelectedEventID)
+    m_NavigationPending = false;
+  if(!m_NavigationPending && m_ArrowScrubKeys.isEmpty() && !SelectEvent(m_Ctx.CurSelectedEvent()))
     ui->events->setCurrentIndex(QModelIndex());
   highlightBookmarks();
 
   m_Model->RefreshCache();
   m_Breadcrumbs->OnEventChanged(eventId);
+}
+
+void EventBrowser::OnReplayNavigationRequested(uint32_t selectedEventId, uint32_t eventId)
+{
+  m_NavigationPending = true;
+  m_NavigationEventID = eventId;
+  m_NavigationSelectedEventID = selectedEventId;
+  QScopedValueRollback<bool> updating(m_UpdatingReplaySelection, true);
+  // Keep marker-row identity distinct from the effective replay endpoint. This is CPU-only
+  // navigation; resource/pipeline viewers continue to consume completed publications.
+  if(!SelectEvent(selectedEventId))
+    ui->events->setCurrentIndex(QModelIndex());
+}
+
+void EventBrowser::CancelReplayNavigation()
+{
+  if(!m_NavigationPending)
+    return;
+  m_NavigationPending = false;
+  QScopedValueRollback<bool> updating(m_UpdatingReplaySelection, true);
+  // Same-event SetEventID may cancel input without issuing OnEventChanged afterwards.
+  if(!SelectEvent(m_Ctx.CurSelectedEvent()))
+    ui->events->setCurrentIndex(QModelIndex());
 }
 
 void EventBrowser::BookmarksChanged()

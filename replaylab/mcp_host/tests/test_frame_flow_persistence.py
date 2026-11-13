@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 from copy import deepcopy
 import hashlib
+import io
 from importlib.util import module_from_spec, spec_from_file_location
 import json
 import os
@@ -22,6 +23,34 @@ SOURCE = Path(__file__).resolve().parents[2] / "renderdoc_mcp_bridge/frame_flow_
 spec = spec_from_file_location("frame_flow_persistence", SOURCE)
 storage = module_from_spec(spec)
 spec.loader.exec_module(storage)
+
+
+@pytest.mark.parametrize("size", [37, 1024 * 1024 + 91])
+def test_bounded_preview_read_does_not_allocate_the_safety_ceiling(monkeypatch, size):
+    payload = b"x" * size
+    requests = []
+
+    class Reader(io.BytesIO):
+        def read(self, count=-1):
+            requests.append(count)
+            return super().read(count)
+
+    source = SimpleNamespace(is_file=lambda: True,
+                             stat=lambda: SimpleNamespace(st_size=size),
+                             open=lambda mode: Reader(payload))
+    monkeypatch.setattr(storage, "_ordinary", lambda path: source)
+    assert storage._bounded("preview", storage.MAX_OUTLINE) == payload
+    assert requests and 0 < max(requests) <= 1024 * 1024
+
+
+def test_bounded_read_still_rejects_a_file_growing_past_its_limit(monkeypatch):
+    maximum = 1024 * 1024 + 9
+    source = SimpleNamespace(is_file=lambda: True,
+                             stat=lambda: SimpleNamespace(st_size=1),
+                             open=lambda mode: io.BytesIO(b"x" * (maximum + 1)))
+    monkeypatch.setattr(storage, "_ordinary", lambda path: source)
+    with pytest.raises(ValueError, match="changed size"):
+        storage._bounded("growing", maximum)
 
 
 def write_rdc_container(path, frame=b"immutable frame payload", metadata=b"old edited shaders", thumbnail=b""):

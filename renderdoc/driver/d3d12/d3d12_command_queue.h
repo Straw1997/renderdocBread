@@ -250,6 +250,7 @@ public:
   RDResult ReplayLog(CaptureState readType, uint32_t startEventID, uint32_t endEventID, bool partial,
                      bool allowPreparedReplay = false, bool allowCheckpoints = false);
   void SetFrameReader(StreamReader *reader) { m_FrameReader = reader; }
+  const StreamReader *GetFrameReaderForMemoryAudit() const { return m_FrameReader; }
   D3D12CommandData *GetCommandData() { return &m_Cmd; }
   bool HasPreparedReplayCache() const { return m_Cmd.HasPreparedReplayCache(); }
   void ClearPreparedReplayCache() { m_Cmd.ClearPreparedReplayCache(); }

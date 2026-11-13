@@ -175,6 +175,11 @@ public:
 
   RDResult ReadLogInitialisation(RDCFile *rdc, bool readStructuredBuffers);
   void ReplayLog(uint32_t endEventID, ReplayLogType replayType);
+  // Opt-in timestamp markers. Read only after the normal prefix completion fence, without an
+  // additional diagnostic wait. These queue intervals include CPU submission gaps/queue waits.
+  void BeginGPUPhaseAudit(uint32_t eventId);
+  void MarkGPUPhaseAudit(uint32_t index);
+  void FinishGPUPhaseAudit(bool completed);
   ShaderPairComparison ComparePixelShaderPair(uint32_t eventId, ResourceId expectedOriginal,
                                                ResourceId baseline, ResourceId candidate) override;
   void ConfigureReplayCheckpoints(const ReplayCheckpointConfig &config,
@@ -722,6 +727,19 @@ private:
   bool m_InitialStateCacheAdapterChecked = false;
   std::map<ResourceId, ID3D12Resource *> m_InitialStateSourceCache;
   uint64_t m_InitialStateSourceCacheBytes = 0;
+  struct GPUPhaseAudit
+  {
+    ID3D12CommandQueue *queue = NULL;    // borrowed native queue; owned by the replay device
+    ResourceId queueId;
+    uint64_t frequency = 0;
+    ID3D12QueryHeap *queries = NULL;
+    ID3D12Resource *readback = NULL;
+    ID3D12CommandAllocator *allocator = NULL;
+    ID3D12GraphicsCommandList *markers[3] = {};
+    uint32_t issued = 0;
+  };
+  rdcarray<GPUPhaseAudit> m_GPUPhaseAudits;
+  uint32_t m_GPUPhaseAuditEvent = 0;
   HMODULE m_D3D12Lib = NULL;
 
   AMDCounters *m_pAMDCounters = NULL;

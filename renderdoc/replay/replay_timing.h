@@ -76,6 +76,8 @@ enum class ReplayTimingContext : uint8_t
   DescriptorWrite,
   DescriptorCopy,
   QueueTransition,
+  CapturedFence,
+  HostRestoreHazard,
   Count,
 };
 
@@ -121,6 +123,16 @@ enum class ReplayTimingCounter : uint8_t
   ChunkBytes,
   ChunkDecodeBoundaries,
   ChunkDecodeBoundaryMissing,
+  InitialClearBytes,
+  InitialClearResources,
+  InitialLayoutResources,
+  InitialQueryResets,
+  HostWriteCacheHits,
+  HostWriteGPUBytes,
+  DecodedCommandCacheHits,
+  DecodedCommandCacheBytes,
+  PreparedModes,
+  InitialOverwrittenBytesSkipped,
   Count,
 };
 

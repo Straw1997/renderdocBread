@@ -35,6 +35,7 @@
 #include "maths/formatpacking.h"
 #include "maths/matrix.h"
 #include "replay/dummy_driver.h"
+#include "replay/replay_timing.h"
 #include "serialise/rdcfile.h"
 #include "strings/string_utils.h"
 #include "vk_core.h"
@@ -244,14 +245,34 @@ RDResult VulkanReplay::ReadLogInitialisation(RDCFile *rdc, bool storeStructuredB
   return m_pDriver->ReadLogInitialisation(rdc, storeStructuredBuffers);
 }
 
+#if defined(_MSC_VER)
+__declspec(noinline)
+#elif defined(__GNUC__)
+__attribute__((noinline))
+#endif
+    uint32_t WrappedVulkan::PreparedReplayModes()
+{
+  // One snapshot per native replay, also providing a single observational A/B boundary to the
+  // private diagnostic fixture. Ordinary application use never loads that fixture or Frida.
+  static const uint32_t modes =
+      (Process::GetEnvVariable("RENDERDOC_VULKAN_DECODED_COMMAND_CACHE") != "0" ? 1U : 0U) |
+      ((Process::GetEnvVariable("RENDERDOC_VULKAN_GPU_HOST_WRITES") == "1" ||
+        Process::GetEnvVariable("RENDERDOC_VULKAN_GPU_HOST_WRITES") == "all")
+           ? 2U
+           : 0U) |
+      (Process::GetEnvVariable("RENDERDOC_VULKAN_DEFER_PARTIAL_REPLAY") != "0" ? 4U : 0U) |
+      (Process::GetEnvVariable("RENDERDOC_VULKAN_SKIP_OVERWRITTEN_RESTORE") != "0" ? 8U : 0U);
+  return modes;
+}
+
 void VulkanReplay::ReplayLog(uint32_t endEventID, ReplayLogType replayType)
 {
   const bool ordinaryRoot = replayType == eReplay_WithoutDraw && !m_ReplayCheckpointBypass &&
                             !m_ReplayCheckpointNaturalReference && !m_pDriver->m_ActionCallback;
   // The pending root identity distinguishes a matching target from an unrelated OnlyDraw;
   // prefix checkpoint eligibility alone cannot establish that execution provenance.
-  const bool ordinaryTarget = replayType == eReplay_OnlyDraw && !m_EventShaderStateApplied &&
-                              !m_pDriver->m_ActionCallback;
+  const bool ordinaryTarget =
+      replayType == eReplay_OnlyDraw && !m_EventShaderStateApplied && !m_pDriver->m_ActionCallback;
   if(replayType == eReplay_OnlyDraw && !m_EventShaderStateApplied)
   {
     bool replayed = FetchShaderFeedback(endEventID);
@@ -263,7 +284,12 @@ void VulkanReplay::ReplayLog(uint32_t endEventID, ReplayLogType replayType)
       return;
     }
   }
+  // Driver-internal debug/feedback replays do not enter this scope. They retain the ordinary
+  // decoder, host writes and conservative synchronization when instrumenting an action.
+  const bool previousPrepared = m_pDriver->m_AllowPreparedReplay;
+  m_pDriver->m_AllowPreparedReplay = !m_EventShaderStateApplied && !m_pDriver->m_ActionCallback;
   m_pDriver->ReplayLog(0, endEventID, replayType, true, ordinaryRoot, ordinaryTarget);
+  m_pDriver->m_AllowPreparedReplay = previousPrepared;
 }
 
 rdcstr VulkanReplay::SetReplayBufferPatches(const rdcarray<ReplayBufferPatch> &patches)
@@ -276,8 +302,8 @@ uint32_t VulkanReplay::GetReplayBufferPatchFirstAffectedEvent() const
   return m_pDriver->m_ReplayPatchFirstAffectedEvent;
 }
 
-void VulkanReplay::ConfigureReplayCheckpoints(
-    const ReplayCheckpointConfig &config, const rdcarray<ReplayCheckpointCandidate> &candidates)
+void VulkanReplay::ConfigureReplayCheckpoints(const ReplayCheckpointConfig &config,
+                                              const rdcarray<ReplayCheckpointCandidate> &candidates)
 {
   m_pDriver->ConfigureReplayCheckpoints(config, candidates);
 }
@@ -5373,7 +5399,9 @@ void VulkanReplay::BuildTargetShader(ShaderEncoding sourceEncoding, const bytebu
     sources.push_back(rdcstr((char *)source.begin(), source.size()));
 
     rdcspv::CompilationSettings settings(sourceEncoding == ShaderEncoding::HLSL
-        ? rdcspv::InputLanguage::VulkanHLSL : rdcspv::InputLanguage::VulkanGLSL, stage);
+                                             ? rdcspv::InputLanguage::VulkanHLSL
+                                             : rdcspv::InputLanguage::VulkanGLSL,
+                                         stage);
     settings.entryPoint = entry;
     // Captured bindings and locations are authoritative; never invent new ones for a replacement.
     settings.autoMapBindings = false;
@@ -5464,6 +5492,7 @@ void VulkanReplay::ReloadShaderDebugInformation()
 
 void VulkanReplay::ReplaceResource(ResourceId from, ResourceId to)
 {
+  m_pDriver->DrainPreparedReplayBeforeMutation();
   // remove existing shader replacement
   m_pDriver->GetResourceManager()->RemoveReplacement(from);
 
@@ -5474,7 +5503,10 @@ void VulkanReplay::ReplaceResource(ResourceId from, ResourceId to)
   m_pDriver->GetResourceManager()->ReplaceResource(from, to);
 
   // now update any derived resources
-  RefreshDerivedReplacements();
+  RefreshDerivedReplacements(m_pDriver->m_CreationInfo.m_ShaderModule.find(from) !=
+                                     m_pDriver->m_CreationInfo.m_ShaderModule.end()
+                                 ? from
+                                 : ResourceId());
 
   ClearPostVSCache();
   ClearFeedbackCache();
@@ -5484,18 +5516,21 @@ void VulkanReplay::RemoveReplacement(ResourceId id)
 {
   if(m_pDriver->GetResourceManager()->HasReplacement(id))
   {
+    m_pDriver->DrainPreparedReplayBeforeMutation();
     m_pDriver->GetResourceManager()->RemoveReplacement(id);
 
-    RefreshDerivedReplacements();
+    RefreshDerivedReplacements(m_pDriver->m_CreationInfo.m_ShaderModule.find(id) !=
+                                       m_pDriver->m_CreationInfo.m_ShaderModule.end()
+                                   ? id
+                                   : ResourceId());
 
     ClearPostVSCache();
     ClearFeedbackCache();
   }
 }
 
-static rdcstr ValidateVulkanShaderReplacementModule(
-    const VulkanCreationInfo::ShaderModule &original,
-    const VulkanCreationInfo::ShaderModule &replacement)
+static rdcstr ValidateVulkanShaderReplacementModule(const VulkanCreationInfo::ShaderModule &original,
+                                                    const VulkanCreationInfo::ShaderModule &replacement)
 {
   const rdcarray<ShaderEntryPoint> originalEntries = original.spirv.EntryPoints();
   const rdcarray<ShaderEntryPoint> replacementEntries = replacement.spirv.EntryPoints();
@@ -5558,10 +5593,10 @@ rdcstr VulkanReplay::ReplaceTargetShaderChecked(ResourceId from, ResourceId to)
 
   // Shader objects are bound directly and have no derived VkPipeline to rebuild. Convert the
   // target module to a matching VkShaderEXT before changing the mapping.
+  m_pDriver->DrainPreparedReplayBeforeMutation();
   ResourceId replacementId = to;
-  const bool shaderObject =
-      m_pDriver->m_CreationInfo.m_ShaderObject.find(from) !=
-      m_pDriver->m_CreationInfo.m_ShaderObject.end();
+  const bool shaderObject = m_pDriver->m_CreationInfo.m_ShaderObject.find(from) !=
+                            m_pDriver->m_CreationInfo.m_ShaderObject.end();
   if(shaderObject)
   {
     ModifyReplacementIfShaderEXT(from, replacementId);
@@ -5607,10 +5642,10 @@ rdcstr VulkanReplay::RemoveTargetShaderReplacementChecked(ResourceId id)
   if(previousId == ResourceId() || previousId == id || rm->GetUnreplacedID(previousId) != id)
     return "The captured Vulkan shader has an invalid replacement target";
 
-  const bool shaderObject =
-      m_pDriver->m_CreationInfo.m_ShaderObject.find(id) !=
-      m_pDriver->m_CreationInfo.m_ShaderObject.end();
+  const bool shaderObject = m_pDriver->m_CreationInfo.m_ShaderObject.find(id) !=
+                            m_pDriver->m_CreationInfo.m_ShaderObject.end();
 
+  m_pDriver->DrainPreparedReplayBeforeMutation();
   rm->RemoveReplacement(id);
   rdcstr error;
   if(!shaderObject)
@@ -5626,8 +5661,13 @@ rdcstr VulkanReplay::RemoveTargetShaderReplacementChecked(ResourceId id)
   return {};
 }
 
-void VulkanReplay::RefreshDerivedReplacements()
+void VulkanReplay::RefreshDerivedReplacements(ResourceId changedShader)
 {
+  static const bool timing = Process::GetEnvVariable("RENDERDOC_EID_TIMING") == "1";
+  PerformanceTimer timer;
+  uint32_t visited = 0, rebuilt = 0;
+  static const bool conservative =
+      Process::GetEnvVariable("RENDERDOC_VULKAN_CONSERVATIVE_SHADER_PIPELINES") == "1";
   VkDevice dev = m_pDriver->GetDev();
 
   VulkanResourceManager *rm = m_pDriver->GetResourceManager();
@@ -5663,6 +5703,15 @@ void VulkanReplay::RefreshDerivedReplacements()
     // only look at pipelines from the capture, no replay-time programs.
     if(ResourceIDGen::IsReplayOnlyID(pipesrcid))
       continue;
+    ++visited;
+    if(changedShader != ResourceId() && !conservative)
+    {
+      bool affected = false;
+      for(const auto &shader : pipeInfo.shaders)
+        affected |= shader.module == changedShader;
+      if(!affected)
+        continue;
+    }
 
     // if this pipeline has a replacement, remove it and delete the program generated for it
     if(rm->HasReplacement(origsrcid))
@@ -5685,6 +5734,7 @@ void VulkanReplay::RefreshDerivedReplacements()
     // if there are replaced shaders in use, create a new pipeline with any/all replaced shaders.
     if(usesReplacedShader)
     {
+      ++rebuilt;
       VkPipeline pipe = VK_NULL_HANDLE;
 
       // check if this is a graphics or compute pipeline
@@ -5806,10 +5856,19 @@ void VulkanReplay::RefreshDerivedReplacements()
 
   for(VkPipeline pipe : deletequeue)
     m_pDriver->vkDestroyPipeline(dev, pipe, NULL);
+  if(timing)
+    AppendReplayTimingLog(StringFormat::Fmt(
+        "api=VulkanShaderPipelines op=legacy visited=%u rebuilt=%u duration_ms=%.6f", visited,
+        rebuilt, timer.GetMilliseconds()));
 }
 
 rdcstr VulkanReplay::RefreshDerivedReplacementsChecked(ResourceId requiredShader)
 {
+  static const bool timing = Process::GetEnvVariable("RENDERDOC_EID_TIMING") == "1";
+  PerformanceTimer timer;
+  uint32_t rebuilt = 0;
+  static const bool conservative =
+      Process::GetEnvVariable("RENDERDOC_VULKAN_CONSERVATIVE_SHADER_PIPELINES") == "1";
   VkDevice dev = m_pDriver->GetDev();
   VulkanResourceManager *rm = m_pDriver->GetResourceManager();
 
@@ -5859,6 +5918,8 @@ rdcstr VulkanReplay::RefreshDerivedReplacementsChecked(ResourceId requiredShader
 
     if(usesRequiredShader)
       requiredUses++;
+    else if(!conservative)
+      continue;
 
     if(pipeInfo.graphicsPipe)
     {
@@ -5910,6 +5971,7 @@ rdcstr VulkanReplay::RefreshDerivedReplacementsChecked(ResourceId requiredShader
       continue;
     }
 
+    ++rebuilt;
     if(pipeInfo.graphicsPipe)
     {
       VkGraphicsPipelineCreateInfo createInfo;
@@ -5953,8 +6015,8 @@ rdcstr VulkanReplay::RefreshDerivedReplacementsChecked(ResourceId requiredShader
         SetPipelineCreateFlags(&createInfo, flags);
       }
 
-      VkResult vkr = m_pDriver->vkCreateGraphicsPipelines(
-          dev, VK_NULL_HANDLE, 1, &createInfo, NULL, &item.replacement);
+      VkResult vkr = m_pDriver->vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &createInfo, NULL,
+                                                          &item.replacement);
       if(vkr != VK_SUCCESS || item.replacement == VK_NULL_HANDLE)
       {
         if(item.replacement != VK_NULL_HANDLE)
@@ -5999,8 +6061,8 @@ rdcstr VulkanReplay::RefreshDerivedReplacementsChecked(ResourceId requiredShader
         SetPipelineCreateFlags(&createInfo, flags);
       }
 
-      VkResult vkr = m_pDriver->vkCreateComputePipelines(
-          dev, VK_NULL_HANDLE, 1, &createInfo, NULL, &item.replacement);
+      VkResult vkr = m_pDriver->vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &createInfo, NULL,
+                                                         &item.replacement);
       if(vkr != VK_SUCCESS || item.replacement == VK_NULL_HANDLE)
       {
         if(item.replacement != VK_NULL_HANDLE)
@@ -6040,22 +6102,28 @@ rdcstr VulkanReplay::RefreshDerivedReplacementsChecked(ResourceId requiredShader
     if(item.previous != VK_NULL_HANDLE)
       m_pDriver->vkDestroyPipeline(dev, item.previous, NULL);
 
+  if(timing)
+    AppendReplayTimingLog(StringFormat::Fmt(
+        "api=VulkanShaderPipelines op=checked visited=%zu affected=%u rebuilt=%u duration_ms=%.6f",
+        capturedPipelines.size(), requiredUses, rebuilt, timer.GetMilliseconds()));
+
   return {};
 }
 
 rdcstr VulkanReplay::SetEventShaderOverride(uint32_t eventId, ShaderStage stage,
-                                           ResourceId expectedOriginal, ResourceId replacement,
-                                           uint32_t outputTarget, bool independentFloatOutput)
+                                            ResourceId expectedOriginal, ResourceId replacement,
+                                            uint32_t outputTarget, bool independentFloatOutput)
 {
   RestoreEventShaderOverrides();
   const ActionDescription *action = m_pDriver->GetAction(eventId);
-  if(!action || !(action->flags & (ActionFlags::Drawcall | ActionFlags::Dispatch | ActionFlags::MeshDispatch)))
+  if(!action ||
+     !(action->flags & (ActionFlags::Drawcall | ActionFlags::Dispatch | ActionFlags::MeshDispatch)))
     return "The event is not a graphics draw or compute dispatch";
   VulkanResourceManager *rm = GetResourceManager();
   auto target = m_pDriver->m_CreationInfo.m_ShaderModule.find(replacement);
   if(expectedOriginal == ResourceId() || rm->GetUnreplacedID(expectedOriginal) != expectedOriginal ||
-     target == m_pDriver->m_CreationInfo.m_ShaderModule.end() ||
-     !rm->HasResource(replacement) || rm->GetUnreplacedID(replacement) != replacement)
+     target == m_pDriver->m_CreationInfo.m_ShaderModule.end() || !rm->HasResource(replacement) ||
+     rm->GetUnreplacedID(replacement) != replacement)
     return "Event Shader override requires a captured original and an unowned SPIR-V target";
   bool matchingStage = false;
   for(const ShaderEntryPoint &entry : target->second.spirv.EntryPoints())
@@ -6067,7 +6135,7 @@ rdcstr VulkanReplay::SetEventShaderOverride(uint32_t eventId, ShaderStage stage,
   if(independentFloatOutput && (stage != ShaderStage::Pixel || outputTarget == ~0U))
     return "Independent float preview requires an explicit fragment color target";
   m_EventShaderOverrides[{eventId, stage}] = {expectedOriginal, replacement, outputTarget,
-                                             independentFloatOutput};
+                                              independentFloatOutput};
   ClearPostVSCache();
   return {};
 }
@@ -6203,11 +6271,13 @@ bool VulkanReplay::EvictInactiveEventShaderFloatPreviews()
        binding->second.outputTarget != item.first.second)
       unused.push_back(item.first);
   }
-  if(unused.empty()) return false;
+  if(unused.empty())
+    return false;
   m_pDriver->SubmitCmds();
   VkDevice dev = m_pDriver->GetDev();
   VkResult idle = ObjDisp(dev)->DeviceWaitIdle(Unwrap(dev));
-  if(idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST) return false;
+  if(idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST)
+    return false;
   m_pDriver->FlushQ();
   for(const auto &key : unused)
   {
@@ -6230,10 +6300,13 @@ rdcstr VulkanReplay::PrepareEventShaderFloatPreview(uint32_t eventId, uint32_t o
   if(requested.dynamic)
   {
     auto &rendering = state.dynamicRendering;
-    if(rendering.localRead.AreLocationsNonDefault() || rendering.localRead.AreInputIndicesNonDefault() ||
-       rendering.fragmentDensityView != VK_NULL_HANDLE || rendering.shadingRateView != VK_NULL_HANDLE ||
-       rendering.tileOnlyMSAAEnable || rendering.beginCustomResolve)
-      return "Independent float preview does not support Vulkan local-read, density or custom-resolve rendering";
+    if(rendering.localRead.AreLocationsNonDefault() ||
+       rendering.localRead.AreInputIndicesNonDefault() ||
+       rendering.fragmentDensityView != VK_NULL_HANDLE ||
+       rendering.shadingRateView != VK_NULL_HANDLE || rendering.tileOnlyMSAAEnable ||
+       rendering.beginCustomResolve)
+      return "Independent float preview does not support Vulkan local-read, density or "
+             "custom-resolve rendering";
     requested.colorCount = (uint32_t)rendering.color.size();
     requested.viewMask = rendering.viewMask;
     requested.layers = rendering.layerCount;
@@ -6247,8 +6320,8 @@ rdcstr VulkanReplay::PrepareEventShaderFloatPreview(uint32_t eventId, uint32_t o
        (rendering.depth.imageView && rendering.stencil.imageView &&
         rendering.depth.imageView != rendering.stencil.imageView))
       return "Independent float preview requires a shared Vulkan depth/stencil view";
-    requested.sourceViews.push_back(GetResID(rendering.depth.imageView ? rendering.depth.imageView :
-                                                                         rendering.stencil.imageView));
+    requested.sourceViews.push_back(GetResID(
+        rendering.depth.imageView ? rendering.depth.imageView : rendering.stencil.imageView));
   }
   else
   {
@@ -6260,7 +6333,8 @@ rdcstr VulkanReplay::PrepareEventShaderFloatPreview(uint32_t eventId, uint32_t o
     const auto &sub = pass->second.subpasses[state.subpass];
     if(!sub.inputAttachments.empty() || sub.feedbackLoop || sub.fragmentDensityAttachment >= 0 ||
        sub.shadingRateAttachment >= 0 || sub.tileOnlyMSAAEnable || sub.customResolve)
-      return "Independent float preview does not support Vulkan input attachments or feedback rendering";
+      return "Independent float preview does not support Vulkan input attachments or feedback "
+             "rendering";
     requested.width = framebuffer->second.width;
     requested.height = framebuffer->second.height;
     requested.layers = framebuffer->second.layers;
@@ -6271,8 +6345,9 @@ rdcstr VulkanReplay::PrepareEventShaderFloatPreview(uint32_t eventId, uint32_t o
     for(uint32_t index : sub.colorAttachments)
       requested.sourceViews.push_back(index < views.size() ? views[index] : ResourceId());
     requested.sourceViews.push_back(sub.depthstencilAttachment >= 0 &&
-                                    (size_t)sub.depthstencilAttachment < views.size()
-                                      ? views[sub.depthstencilAttachment] : ResourceId());
+                                            (size_t)sub.depthstencilAttachment < views.size()
+                                        ? views[sub.depthstencilAttachment]
+                                        : ResourceId());
   }
   if(outputTarget >= requested.colorCount || requested.sourceViews[outputTarget] == ResourceId())
     return "Independent float preview requires a bound Vulkan color attachment";
@@ -6288,10 +6363,11 @@ rdcstr VulkanReplay::PrepareEventShaderFloatPreview(uint32_t eventId, uint32_t o
   auto existing = m_EventShaderFloatPreviews.find({eventId, outputTarget});
   if(existing != m_EventShaderFloatPreviews.end() &&
      (existing->second.sourceViews != requested.sourceViews ||
-      existing->second.dynamic != requested.dynamic || existing->second.viewMask != requested.viewMask ||
-      existing->second.width != requested.width || existing->second.height != requested.height ||
-      existing->second.layers != requested.layers))
-    return "Independent float preview attachment bindings changed; release the previous preview first";
+      existing->second.dynamic != requested.dynamic ||
+      existing->second.viewMask != requested.viewMask || existing->second.width != requested.width ||
+      existing->second.height != requested.height || existing->second.layers != requested.layers))
+    return "Independent float preview attachment bindings changed; release the previous preview "
+           "first";
   if(existing == m_EventShaderFloatPreviews.end())
   {
     if(m_EventShaderFloatPreviews.size() >= 4)
@@ -6311,106 +6387,154 @@ rdcstr VulkanReplay::PrepareEventShaderFloatPreview(uint32_t eventId, uint32_t o
         continue;
       auto viewIt = info.m_ImageView.find(requested.sourceViews[index]);
       if(viewIt == info.m_ImageView.end())
-      { failure = "Independent float preview attachment metadata is unavailable"; break; }
+      {
+        failure = "Independent float preview attachment metadata is unavailable";
+        break;
+      }
       const auto &view = viewIt->second;
       VkImage source = rm->GetHandle<VkImage>(view.image);
       auto imageIt = info.m_Image.find(GetResID(source));
       if(imageIt == info.m_Image.end())
-      { failure = "Independent float preview source image is unavailable"; break; }
+      {
+        failure = "Independent float preview source image is unavailable";
+        break;
+      }
       const auto &image = imageIt->second;
       if(image.type != VK_IMAGE_TYPE_2D || image.sparse || image.external || image.linear ||
          (view.viewType != VK_IMAGE_VIEW_TYPE_2D && view.viewType != VK_IMAGE_VIEW_TYPE_2D_ARRAY) ||
          view.range.baseMipLevel >= image.mipLevels || view.range.baseArrayLayer >= image.arrayLayers)
-      { failure = "Independent float preview requires a resident Vulkan 2D attachment"; break; }
+      {
+        failure = "Independent float preview requires a resident Vulkan 2D attachment";
+        break;
+      }
       auto &a = requested.attachments[index];
       a.sourceView = requested.sourceViews[index];
       a.sourceImage = GetResID(source);
       a.sourceRange = view.range;
       a.sourceRange.levelCount = 1;
-      a.sourceRange.layerCount = RDCMIN(view.range.layerCount, image.arrayLayers - view.range.baseArrayLayer);
+      a.sourceRange.layerCount =
+          RDCMIN(view.range.layerCount, image.arrayLayers - view.range.baseArrayLayer);
       a.extent = {RDCMAX(1U, image.extent.width >> view.range.baseMipLevel),
-                   RDCMAX(1U, image.extent.height >> view.range.baseMipLevel), 1};
+                  RDCMAX(1U, image.extent.height >> view.range.baseMipLevel), 1};
       a.samples = image.samples;
       a.format = index == outputTarget ? VK_FORMAT_R32G32B32A32_SFLOAT : view.format;
       const bool depth = index == requested.colorCount;
-      const VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+      const VkImageUsageFlags usage =
+          VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
           (depth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) |
           (index == outputTarget ? VK_IMAGE_USAGE_SAMPLED_BIT : 0);
       VkImageFormatProperties support = {};
-      VkResult result = m_pDriver->vkGetPhysicalDeviceImageFormatProperties(m_pDriver->GetPhysDev(),
-          a.format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage,
+      VkResult result = m_pDriver->vkGetPhysicalDeviceImageFormatProperties(
+          m_pDriver->GetPhysDev(), a.format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage,
           m_pDriver->DefaultImageCreateFlags(), &support);
       if(result != VK_SUCCESS || !(support.sampleCounts & a.samples) ||
          a.extent.width > support.maxExtent.width || a.extent.height > support.maxExtent.height ||
          a.sourceRange.layerCount > support.maxArrayLayers)
-      { failure = "Independent RGBA32_FLOAT preview format or sample count is unsupported on this device"; break; }
+      {
+        failure =
+            "Independent RGBA32_FLOAT preview format or sample count is unsupported on this device";
+        break;
+      }
       VkImageCreateInfo create = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
       create.flags = m_pDriver->DefaultImageCreateFlags();
-      create.imageType = VK_IMAGE_TYPE_2D; create.format = a.format; create.extent = a.extent;
-      create.mipLevels = 1; create.arrayLayers = a.sourceRange.layerCount; create.samples = a.samples;
-      create.tiling = VK_IMAGE_TILING_OPTIMAL; create.usage = usage;
+      create.imageType = VK_IMAGE_TYPE_2D;
+      create.format = a.format;
+      create.extent = a.extent;
+      create.mipLevels = 1;
+      create.arrayLayers = a.sourceRange.layerCount;
+      create.samples = a.samples;
+      create.tiling = VK_IMAGE_TILING_OPTIMAL;
+      create.usage = usage;
       create.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
       result = m_pDriver->vkCreateImage(dev, &create, NULL, &a.image);
       if(result != VK_SUCCESS)
-      { failure = "Failed to allocate an independent Vulkan preview image"; break; }
+      {
+        failure = "Failed to allocate an independent Vulkan preview image";
+        break;
+      }
       VkMemoryRequirements requirements = {};
       m_pDriver->vkGetImageMemoryRequirements(dev, a.image, &requirements);
       a.bytes = requirements.size;
       if(a.bytes > budget || retainedBytes + requested.bytes > budget - a.bytes)
-      { failure = "Independent float preview exceeds its 256 MiB scratch budget"; break; }
+      {
+        failure = "Independent float preview exceeds its 256 MiB scratch budget";
+        break;
+      }
       requested.bytes += a.bytes;
       VkMemoryAllocateInfo alloc = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, requirements.size,
-                                     m_pDriver->GetGPULocalMemoryIndex(requirements.memoryTypeBits)};
+                                    m_pDriver->GetGPULocalMemoryIndex(requirements.memoryTypeBits)};
       result = m_pDriver->vkAllocateMemory(dev, &alloc, NULL, &a.memory);
       if(result == VK_SUCCESS)
         result = m_pDriver->vkBindImageMemory(dev, a.image, a.memory, 0);
       if(result != VK_SUCCESS)
-      { failure = "Failed to bind independent Vulkan preview memory"; break; }
+      {
+        failure = "Failed to bind independent Vulkan preview memory";
+        break;
+      }
       VkImageViewCreateInfo createView = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-      createView.image = a.image; createView.format = a.format;
-      createView.viewType = a.sourceRange.layerCount > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+      createView.image = a.image;
+      createView.format = a.format;
+      createView.viewType =
+          a.sourceRange.layerCount > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
       createView.subresourceRange = {view.range.aspectMask, 0, 1, 0, a.sourceRange.layerCount};
       result = m_pDriver->vkCreateImageView(dev, &createView, NULL, &a.view);
       if(result != VK_SUCCESS)
-      { failure = "Failed to create an independent Vulkan preview view"; break; }
+      {
+        failure = "Failed to create an independent Vulkan preview view";
+        break;
+      }
     }
     if(failure.empty() && !requested.dynamic)
     {
       rdcarray<VkAttachmentDescription> descriptions;
       rdcarray<VkImageView> views;
       rdcarray<VkAttachmentReference> colors;
-      VkAttachmentReference depth = {VK_ATTACHMENT_UNUSED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+      VkAttachmentReference depth = {VK_ATTACHMENT_UNUSED,
+                                     VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
       for(size_t i = 0; i < requested.attachments.size(); i++)
       {
         const auto &a = requested.attachments[i];
-        VkAttachmentReference ref = {VK_ATTACHMENT_UNUSED, i == requested.colorCount ?
-          VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+        VkAttachmentReference ref = {VK_ATTACHMENT_UNUSED,
+                                     i == requested.colorCount
+                                         ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                                         : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
         if(a.image != VK_NULL_HANDLE)
         {
           ref.attachment = (uint32_t)descriptions.size();
           descriptions.push_back({0, a.format, a.samples, VK_ATTACHMENT_LOAD_OP_LOAD,
-            VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE,
-            ref.layout, ref.layout});
+                                  VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_LOAD,
+                                  VK_ATTACHMENT_STORE_OP_STORE, ref.layout, ref.layout});
           views.push_back(a.view);
         }
-        if(i < requested.colorCount) colors.push_back(ref); else depth = ref;
+        if(i < requested.colorCount)
+          colors.push_back(ref);
+        else
+          depth = ref;
       }
       VkSubpassDescription sub = {};
       sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-      sub.colorAttachmentCount = (uint32_t)colors.size(); sub.pColorAttachments = colors.data();
+      sub.colorAttachmentCount = (uint32_t)colors.size();
+      sub.pColorAttachments = colors.data();
       sub.pDepthStencilAttachment = depth.attachment == VK_ATTACHMENT_UNUSED ? NULL : &depth;
-      VkRenderPassMultiviewCreateInfo multiview = {VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO};
-      multiview.subpassCount = 1; multiview.pViewMasks = &requested.viewMask;
+      VkRenderPassMultiviewCreateInfo multiview = {
+          VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO};
+      multiview.subpassCount = 1;
+      multiview.pViewMasks = &requested.viewMask;
       VkRenderPassCreateInfo create = {VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
       create.pNext = requested.viewMask ? &multiview : NULL;
-      create.attachmentCount = (uint32_t)descriptions.size(); create.pAttachments = descriptions.data();
-      create.subpassCount = 1; create.pSubpasses = &sub;
+      create.attachmentCount = (uint32_t)descriptions.size();
+      create.pAttachments = descriptions.data();
+      create.subpassCount = 1;
+      create.pSubpasses = &sub;
       VkResult result = m_pDriver->vkCreateRenderPass(dev, &create, NULL, &requested.renderPass);
       if(result == VK_SUCCESS)
       {
         VkFramebufferCreateInfo fb = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-        fb.renderPass = requested.renderPass; fb.attachmentCount = (uint32_t)views.size();
-        fb.pAttachments = views.data(); fb.width = requested.width; fb.height = requested.height;
+        fb.renderPass = requested.renderPass;
+        fb.attachmentCount = (uint32_t)views.size();
+        fb.pAttachments = views.data();
+        fb.width = requested.width;
+        fb.height = requested.height;
         fb.layers = requested.viewMask ? 1 : requested.layers;
         result = m_pDriver->vkCreateFramebuffer(dev, &fb, NULL, &requested.framebuffer);
       }
@@ -6424,7 +6548,8 @@ rdcstr VulkanReplay::PrepareEventShaderFloatPreview(uint32_t eventId, uint32_t o
         return PrepareEventShaderFloatPreview(eventId, outputTarget, target, state, preview);
       return failure;
     }
-    existing = m_EventShaderFloatPreviews.insert({{eventId, outputTarget}, std::move(requested)}).first;
+    existing =
+        m_EventShaderFloatPreviews.insert({{eventId, outputTarget}, std::move(requested)}).first;
   }
   preview = &existing->second;
   preview->users.insert(target);
@@ -6449,11 +6574,17 @@ rdcstr VulkanReplay::PrepareEventShaderFloatPreview(uint32_t eventId, uint32_t o
   for(size_t i = 0; i < preview->attachments.size(); i++)
   {
     const auto &a = preview->attachments[i];
-    if(a.image == VK_NULL_HANDLE) continue;
+    if(a.image == VK_NULL_HANDLE)
+      continue;
     LockedImageStateRef destination = m_pDriver->FindImageState(GetResID(a.image));
-    if(!destination) { copied = false; break; }
-    destination->InlineTransition(cmd, m_pDriver->m_QueueFamilyIdx, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-      VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, m_pDriver->GetImageTransitionInfo());
+    if(!destination)
+    {
+      copied = false;
+      break;
+    }
+    destination->InlineTransition(cmd, m_pDriver->m_QueueFamilyIdx,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT,
+                                  VK_ACCESS_TRANSFER_WRITE_BIT, m_pDriver->GetImageTransitionInfo());
     if(i == outputTarget)
     {
       VkClearColorValue clear = {};
@@ -6464,28 +6595,39 @@ rdcstr VulkanReplay::PrepareEventShaderFloatPreview(uint32_t eventId, uint32_t o
     else
     {
       LockedConstImageStateRef source = m_pDriver->FindConstImageState(a.sourceImage);
-      if(!source || !source->isMemoryBound) { copied = false; break; }
+      if(!source || !source->isMemoryBound)
+      {
+        copied = false;
+        break;
+      }
       ImageBarrierSequence setup;
       source->TempTransition(m_pDriver->m_QueueFamilyIdx, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        VK_ACCESS_TRANSFER_READ_BIT, setup, cleanup, m_pDriver->GetImageTransitionInfo());
+                             VK_ACCESS_TRANSFER_READ_BIT, setup, cleanup,
+                             m_pDriver->GetImageTransitionInfo());
       m_pDriver->InlineSetupImageBarriers(cmd, setup);
       m_pDriver->SubmitAndFlushImageStateBarriers(setup);
       rdcarray<VkImageCopy> copies;
       for(auto aspect = ImageAspectFlagIter::begin(FormatImageAspects(a.format));
           aspect != ImageAspectFlagIter::end(); ++aspect)
         copies.push_back({{(VkImageAspectFlags)*aspect, a.sourceRange.baseMipLevel,
-                            a.sourceRange.baseArrayLayer, a.sourceRange.layerCount}, {0, 0, 0},
-                           {(VkImageAspectFlags)*aspect, 0, 0, a.sourceRange.layerCount}, {0, 0, 0}, a.extent});
+                           a.sourceRange.baseArrayLayer, a.sourceRange.layerCount},
+                          {0, 0, 0},
+                          {(VkImageAspectFlags)*aspect, 0, 0, a.sourceRange.layerCount},
+                          {0, 0, 0},
+                          a.extent});
       vt->CmdCopyImage(Unwrap(cmd), Unwrap(rm->GetHandle<VkImage>(a.sourceImage)),
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, Unwrap(a.image), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        (uint32_t)copies.size(), copies.data());
+                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, Unwrap(a.image),
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, (uint32_t)copies.size(), copies.data());
     }
     const bool depth = i == preview->colorCount;
-    destination->InlineTransition(cmd, m_pDriver->m_QueueFamilyIdx,
-      depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-      VK_ACCESS_TRANSFER_WRITE_BIT, depth ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-      VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT : VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
-      VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, m_pDriver->GetImageTransitionInfo());
+    destination->InlineTransition(
+        cmd, m_pDriver->m_QueueFamilyIdx,
+        depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+              : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_ACCESS_TRANSFER_WRITE_BIT,
+        depth ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
+              : VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        m_pDriver->GetImageTransitionInfo());
   }
   m_pDriver->InlineCleanupImageBarriers(cmd, cleanup);
   result = vt->EndCommandBuffer(Unwrap(cmd));
@@ -6520,16 +6662,21 @@ rdcstr VulkanReplay::PrepareEventShaderFloatPreview(uint32_t eventId, uint32_t o
       auto &color = state.dynamicRendering.color[i];
       color.imageView = preview->attachments[i].view;
       color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-      color.resolveMode = VK_RESOLVE_MODE_NONE; color.resolveImageView = VK_NULL_HANDLE;
-      color.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+      color.resolveMode = VK_RESOLVE_MODE_NONE;
+      color.resolveImageView = VK_NULL_HANDLE;
+      color.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+      color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     }
-    for(VkRenderingAttachmentInfo *depth : {&state.dynamicRendering.depth, &state.dynamicRendering.stencil})
+    for(VkRenderingAttachmentInfo *depth :
+        {&state.dynamicRendering.depth, &state.dynamicRendering.stencil})
       if(depth->imageView != VK_NULL_HANDLE)
       {
         depth->imageView = preview->attachments[preview->colorCount].view;
         depth->imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        depth->resolveMode = VK_RESOLVE_MODE_NONE; depth->resolveImageView = VK_NULL_HANDLE;
-        depth->loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; depth->storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        depth->resolveMode = VK_RESOLVE_MODE_NONE;
+        depth->resolveImageView = VK_NULL_HANDLE;
+        depth->loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        depth->storeOp = VK_ATTACHMENT_STORE_OP_STORE;
       }
     state.dynamicRendering.flags &= ~(VK_RENDERING_SUSPENDING_BIT | VK_RENDERING_RESUMING_BIT);
   }
@@ -6569,12 +6716,13 @@ rdcstr VulkanReplay::ApplyEventShaderOverrides(uint32_t eventId)
     const uint32_t stage = uint32_t(item.first);
     if((item.first == ShaderStage::Compute) != compute)
       return "Graphics and compute Shader overrides cannot share one action";
-    ResourceId original = binding.shaderObject ? state.shaderObjects[stage]
-                                               : pipe->second.shaders[stage].module;
+    ResourceId original =
+        binding.shaderObject ? state.shaderObjects[stage] : pipe->second.shaders[stage].module;
     if(original == ResourceId() || rm->GetUnreplacedID(original) != item.second.original)
       return "The selected Vulkan event no longer binds the expected Shader";
     auto module = m_pDriver->m_CreationInfo.m_ShaderModule.find(item.second.replacement);
-    if(module == m_pDriver->m_CreationInfo.m_ShaderModule.end() || !rm->HasResource(item.second.replacement))
+    if(module == m_pDriver->m_CreationInfo.m_ShaderModule.end() ||
+       !rm->HasResource(item.second.replacement))
       return "The event Shader target is no longer available";
     rdcstr entry;
     if(binding.shaderObject)
@@ -6612,7 +6760,8 @@ rdcstr VulkanReplay::ApplyEventShaderOverrides(uint32_t eventId)
         VkShaderEXT variant = VK_NULL_HANDLE;
         VkResult result = m_pDriver->vkCreateShadersEXT(m_pDriver->GetDev(), 1, &ci, NULL, &variant);
         if(result != VK_SUCCESS || variant == VK_NULL_HANDLE)
-          return StringFormat::Fmt("Creating the event Shader object failed: %s", ToStr(result).c_str());
+          return StringFormat::Fmt("Creating the event Shader object failed: %s",
+                                   ToStr(result).c_str());
         cached = m_EventShaderObjects.insert({objectKey, variant}).first;
       }
       changed.shaderObjects[stage] = GetResID(cached->second);
@@ -6622,7 +6771,8 @@ rdcstr VulkanReplay::ApplyEventShaderOverrides(uint32_t eventId)
   if(key.independentFloatOutput)
   {
     rdcstr error = PrepareEventShaderFloatPreview(eventId, key.outputTarget,
-      key.replacements[uint32_t(ShaderStage::Pixel)], changed, floatPreview);
+                                                  key.replacements[uint32_t(ShaderStage::Pixel)],
+                                                  changed, floatPreview);
     if(!error.empty())
       return error;
   }
@@ -6637,8 +6787,10 @@ rdcstr VulkanReplay::ApplyEventShaderOverrides(uint32_t eventId)
       {
         VkComputePipelineCreateInfo ci = {};
         m_pDriver->GetShaderCache()->MakeComputePipelineInfo(ci, key.pipeline);
-        ci.stage.module = rm->GetHandle<VkShaderModule>(key.replacements[uint32_t(ShaderStage::Compute)]);
-        result = m_pDriver->vkCreateComputePipelines(m_pDriver->GetDev(), VK_NULL_HANDLE, 1, &ci, NULL, &variant);
+        ci.stage.module =
+            rm->GetHandle<VkShaderModule>(key.replacements[uint32_t(ShaderStage::Compute)]);
+        result = m_pDriver->vkCreateComputePipelines(m_pDriver->GetDev(), VK_NULL_HANDLE, 1, &ci,
+                                                     NULL, &variant);
       }
       else
       {
@@ -6663,7 +6815,8 @@ rdcstr VulkanReplay::ApplyEventShaderOverrides(uint32_t eventId)
           if(floatPreview->dynamic)
           {
             const VkPipelineRenderingCreateInfo *originalRendering =
-                (const VkPipelineRenderingCreateInfo *)FindNextStruct(&ci, VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO);
+                (const VkPipelineRenderingCreateInfo *)FindNextStruct(
+                    &ci, VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO);
             if(!originalRendering)
               return "Independent float preview requires Vulkan dynamic-rendering pipeline formats";
             rendering = *originalRendering;
@@ -6719,10 +6872,12 @@ rdcstr VulkanReplay::ApplyEventShaderOverrides(uint32_t eventId)
             ci.pMultisampleState = &multisample;
           }
         }
-        result = m_pDriver->vkCreateGraphicsPipelines(m_pDriver->GetDev(), VK_NULL_HANDLE, 1, &ci, NULL, &variant);
+        result = m_pDriver->vkCreateGraphicsPipelines(m_pDriver->GetDev(), VK_NULL_HANDLE, 1, &ci,
+                                                      NULL, &variant);
       }
       if(result != VK_SUCCESS || variant == VK_NULL_HANDLE)
-        return StringFormat::Fmt("Creating the event Shader pipeline failed: %s", ToStr(result).c_str());
+        return StringFormat::Fmt("Creating the event Shader pipeline failed: %s",
+                                 ToStr(result).c_str());
       if(m_EventShaderPipelines.size() >= 64)
         ReleaseEventShaderPipelines();
       cached = m_EventShaderPipelines.insert({key, variant}).first;
@@ -6732,9 +6887,12 @@ rdcstr VulkanReplay::ApplyEventShaderOverrides(uint32_t eventId)
   if(key.outputTarget != ~0U)
   {
     const uint32_t n = key.outputTarget + 1;
-    if(changed.colorBlendEnable.size() < n) changed.colorBlendEnable.resize(n);
-    if(changed.colorWriteMask.size() < n) changed.colorWriteMask.resize(n);
-    if(changed.colorWriteEnable.size() < n) changed.colorWriteEnable.resize(n);
+    if(changed.colorBlendEnable.size() < n)
+      changed.colorBlendEnable.resize(n);
+    if(changed.colorWriteMask.size() < n)
+      changed.colorWriteMask.resize(n);
+    if(changed.colorWriteEnable.size() < n)
+      changed.colorWriteEnable.resize(n);
     changed.colorBlendEnable[key.outputTarget] = VK_FALSE;
     changed.colorWriteMask[key.outputTarget] = 0xf;
     changed.colorWriteEnable[key.outputTarget] = VK_TRUE;
@@ -6953,21 +7111,21 @@ ShaderPairComparison VulkanReplay::ComparePixelShaderPair(uint32_t eventId,
   auto rpIt = info.m_RenderPass.find(state.GetRenderPass());
   if(pipeIt == info.m_Pipeline.end() || rpIt == info.m_RenderPass.end() ||
      state.graphics.shaderObject || state.dynamicRendering.active || state.subpass != 0 ||
-     rpIt->second.subpasses.size() != 1 ||
-     state.graphics.UsingDescBufs() || state.conditionalRendering.buffer != ResourceId() ||
-     std::any_of(state.xfbbuffers.begin(), state.xfbbuffers.end(),
-                 [](const VulkanRenderState::XFBBuffer &buffer) { return buffer.buf != ResourceId(); }) ||
+     rpIt->second.subpasses.size() != 1 || state.graphics.UsingDescBufs() ||
+     state.conditionalRendering.buffer != ResourceId() ||
+     std::any_of(
+         state.xfbbuffers.begin(), state.xfbbuffers.end(),
+         [](const VulkanRenderState::XFBBuffer &buffer) { return buffer.buf != ResourceId(); }) ||
      !state.xfbcounters.empty())
-    return reject(StringFormat::Fmt("Paired replay state is unsupported: pipeline=%u renderPass=%u "
-                                   "shaderObject=%u dynamic=%u subpass=%u contents=%u subpassCount=%u "
-                                   "descriptorBuffers=%u conditional=%u xfb=%u counters=%u",
-                                   pipeIt != info.m_Pipeline.end(), rpIt != info.m_RenderPass.end(),
-                                   state.graphics.shaderObject, state.dynamicRendering.active,
-                                   state.subpass, uint32_t(state.subpassContents),
-                                   rpIt == info.m_RenderPass.end() ? 0U : uint32_t(rpIt->second.subpasses.size()),
-                                   state.graphics.UsingDescBufs(),
-                                   state.conditionalRendering.buffer != ResourceId(),
-                                   uint32_t(state.xfbbuffers.size()), uint32_t(state.xfbcounters.size())));
+    return reject(StringFormat::Fmt(
+        "Paired replay state is unsupported: pipeline=%u renderPass=%u "
+        "shaderObject=%u dynamic=%u subpass=%u contents=%u subpassCount=%u "
+        "descriptorBuffers=%u conditional=%u xfb=%u counters=%u",
+        pipeIt != info.m_Pipeline.end(), rpIt != info.m_RenderPass.end(), state.graphics.shaderObject,
+        state.dynamicRendering.active, state.subpass, uint32_t(state.subpassContents),
+        rpIt == info.m_RenderPass.end() ? 0U : uint32_t(rpIt->second.subpasses.size()),
+        state.graphics.UsingDescBufs(), state.conditionalRendering.buffer != ResourceId(),
+        uint32_t(state.xfbbuffers.size()), uint32_t(state.xfbcounters.size())));
   const VulkanCreationInfo::Pipeline &pipe = pipeIt->second;
   const auto &fragment = pipe.shaders[(uint32_t)ShaderStage::Pixel];
   if(!pipe.graphicsPipe || fragment.module != expectedOriginal)
@@ -6989,8 +7147,8 @@ ShaderPairComparison VulkanReplay::ComparePixelShaderPair(uint32_t eventId,
     return reject("Paired render pass exceeds the load-pass attachment bound");
   if(std::any_of(subpass.inputAttachments.begin(), subpass.inputAttachments.end(),
                  [](uint32_t attachment) { return attachment != VK_ATTACHMENT_UNUSED; }) ||
-     !subpass.multiviews.empty() || subpass.feedbackLoop ||
-     subpass.tileOnlyMSAAEnable || subpass.customResolve || subpass.fragmentDensityAttachment >= 0 ||
+     !subpass.multiviews.empty() || subpass.feedbackLoop || subpass.tileOnlyMSAAEnable ||
+     subpass.customResolve || subpass.fragmentDensityAttachment >= 0 ||
      subpass.shadingRateAttachment >= 0 || subpass.depthstencilResolveAttachment >= 0)
     return reject("Paired observations cannot yet isolate this subpass's additional attachments");
   for(uint32_t attachment : subpass.resolveAttachments)
@@ -7323,19 +7481,16 @@ ResourceId VulkanReplay::CreateTextureSnapshot(ResourceId source, const Subresou
   VkImageCreateInfo createInfo = {
       VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
       NULL,
-      m_pDriver->DefaultImageCreateFlags() |
-          (mutableFormat ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0),
+      m_pDriver->DefaultImageCreateFlags() | (mutableFormat ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0),
       sourceInfo.type,
       sourceInfo.format,
-      {RDCMAX(1U, sourceInfo.extent.width >> mip),
-       RDCMAX(1U, sourceInfo.extent.height >> mip),
+      {RDCMAX(1U, sourceInfo.extent.width >> mip), RDCMAX(1U, sourceInfo.extent.height >> mip),
        is3D ? RDCMAX(1U, sourceInfo.extent.depth >> mip) : 1U},
       1,
       1,
       VK_SAMPLE_COUNT_1_BIT,
       VK_IMAGE_TILING_OPTIMAL,
-      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-          VK_IMAGE_USAGE_SAMPLED_BIT,
+      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
       VK_SHARING_MODE_EXCLUSIVE,
       0,
       NULL,
@@ -7343,8 +7498,7 @@ ResourceId VulkanReplay::CreateTextureSnapshot(ResourceId source, const Subresou
   };
 
   VkImage snapshotImage = VK_NULL_HANDLE;
-  VkResult vkr =
-      m_pDriver->vkCreateImage(m_pDriver->GetDev(), &createInfo, NULL, &snapshotImage);
+  VkResult vkr = m_pDriver->vkCreateImage(m_pDriver->GetDev(), &createInfo, NULL, &snapshotImage);
   CHECK_VKR(m_pDriver, vkr);
   if(vkr != VK_SUCCESS || snapshotImage == VK_NULL_HANDLE)
     return ResourceId();
@@ -7409,8 +7563,7 @@ ResourceId VulkanReplay::CreateTextureSnapshot(ResourceId source, const Subresou
       m_pDriver->m_CreationInfo.m_Image.erase(snapshotId);
       return ResourceId();
     }
-    ObjDisp(m_pDriver->GetDev())
-        ->DestroyImageView(Unwrap(m_pDriver->GetDev()), testView, NULL);
+    ObjDisp(m_pDriver->GetDev())->DestroyImageView(Unwrap(m_pDriver->GetDev()), testView, NULL);
   }
 
   // Register ownership before recording. The failure path below drops the state locks, resets the
@@ -7421,8 +7574,7 @@ ResourceId VulkanReplay::CreateTextureSnapshot(ResourceId source, const Subresou
   const bool recorded = [&]() {
     LockedConstImageStateRef sourceState = m_pDriver->FindConstImageState(resolvedSource);
     LockedImageStateRef snapshotState = m_pDriver->FindImageState(snapshotId);
-    if(!sourceState || !sourceState->isMemoryBound || !snapshotState ||
-       !snapshotState->isMemoryBound)
+    if(!sourceState || !sourceState->isMemoryBound || !snapshotState || !snapshotState->isMemoryBound)
       return false;
 
     snapshotCmd = m_pDriver->GetNextCmd();
@@ -7447,30 +7599,24 @@ ResourceId VulkanReplay::CreateTextureSnapshot(ResourceId source, const Subresou
     m_pDriver->InlineSetupImageBarriers(snapshotCmd, sourceSetup);
     m_pDriver->SubmitAndFlushImageStateBarriers(sourceSetup);
 
-    snapshotState->InlineTransition(snapshotCmd, m_pDriver->m_QueueFamilyIdx,
-                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
-                                    VK_ACCESS_TRANSFER_WRITE_BIT,
-                                    m_pDriver->GetImageTransitionInfo());
+    snapshotState->InlineTransition(
+        snapshotCmd, m_pDriver->m_QueueFamilyIdx, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+        VK_ACCESS_TRANSFER_WRITE_BIT, m_pDriver->GetImageTransitionInfo());
 
     rdcarray<VkImageCopy> regions;
-    for(auto aspectIt = ImageAspectFlagIter::begin(aspects);
-        aspectIt != ImageAspectFlagIter::end(); ++aspectIt)
+    for(auto aspectIt = ImageAspectFlagIter::begin(aspects); aspectIt != ImageAspectFlagIter::end();
+        ++aspectIt)
     {
       const VkImageAspectFlags aspect = (VkImageAspectFlags)*aspectIt;
       VkImageCopy region = {
-          {aspect, mip, sourceLayer, 1},
-          {0, 0, 0},
-          {aspect, 0, 0, 1},
-          {0, 0, 0},
-          createInfo.extent,
+          {aspect, mip, sourceLayer, 1}, {0, 0, 0}, {aspect, 0, 0, 1}, {0, 0, 0}, createInfo.extent,
       };
       regions.push_back(region);
     }
 
-    vt->CmdCopyImage(Unwrap(snapshotCmd), Unwrap(sourceImage),
-                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, Unwrap(snapshotImage),
-                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, (uint32_t)regions.size(),
-                     regions.data());
+    vt->CmdCopyImage(Unwrap(snapshotCmd), Unwrap(sourceImage), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                     Unwrap(snapshotImage), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                     (uint32_t)regions.size(), regions.data());
 
     const VkImageLayout readyLayout =
         aspects & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)

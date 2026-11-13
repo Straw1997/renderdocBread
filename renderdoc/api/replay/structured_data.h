@@ -470,6 +470,7 @@ struct SDObjectData
   SDObjectData &operator=(const SDObjectData &other) = delete;
 
 private:
+  friend struct ReplayStructuredMemoryAudit;
   friend struct SDObject;
   friend struct SDChunk;
 
@@ -1213,6 +1214,7 @@ protected:
 
 private:
   SDObject *m_Parent = NULL;
+  friend struct ReplayStructuredMemoryAudit;
   mutable LazyArrayData *m_Lazy = NULL;
 
   // object serialisers need to be able to set the parent pointer. This is only for proxying really

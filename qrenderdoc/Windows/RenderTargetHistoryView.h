@@ -105,6 +105,7 @@ public:
   void OnSelectedEventChanged(uint32_t eventId) override {}
   void OnEventChanged(uint32_t eventId) override;
   void OnScrubEvent(uint32_t eventId) override;
+  void OnReplayInput();
 
 protected:
   void resizeEvent(QResizeEvent *event) override;
@@ -127,6 +128,7 @@ private:
   static std::shared_ptr<CacheEntry> AcquireCache(ICaptureContext &ctx, ResourceId resource,
                                                   const Subresource &subresource,
                                                   CompType typeCast);
+  static QMap<QString, std::shared_ptr<CacheEntry>> &CacheRegistry();
 
   void StartLoad();
   void ResumeAfterScrub();
@@ -180,6 +182,7 @@ private:
   uint64_t m_ImageUseSerial = 0;
   uint64_t m_RequestSerial = 0;
   bool m_RefreshScheduled = false;
+  bool m_ApplyingBatch = false;
   bool m_ScrollPending = false;
   bool m_ReplayThreadAvailable = false;
   QTimer *m_ScrubResumeTimer = NULL;

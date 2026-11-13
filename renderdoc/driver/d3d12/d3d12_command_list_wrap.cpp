@@ -3837,6 +3837,10 @@ D3D12ExecuteData WrappedID3D12GraphicsCommandList::SaveExecuteIndirectParameters
   // For variable count indirects only allocate up to one indirect command to avoid pessimistic
   // allocation if MaxCommandCount is very high but the actual action count is low.
   exec.reservedCount = pCountBuffer ? RDCMIN(1U, MaxCommandCount) : MaxCommandCount;
+  exec.sourceArgs = GetResID(pArgumentBuffer);
+  exec.sourceArgsOffset = ArgumentBufferOffset;
+  exec.sourceCount = GetResID(pCountBuffer);
+  exec.sourceCountOffset = CountBufferOffset;
   if(pCountBuffer)
   {
     exec.countBuf = buf;

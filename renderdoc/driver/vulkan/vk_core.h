@@ -30,9 +30,9 @@
 #include "common/timing.h"
 #include "core/gpu_address_range_tracker.h"
 #include "core/rdcbytetrie.h"
-#include "serialise/serialiser.h"
 #include "replay/replay_driver.h"
 #include "replay/replay_resource_versions.h"
+#include "serialise/serialiser.h"
 #include "vk_acceleration_structure.h"
 #include "vk_common.h"
 #include "vk_info.h"
@@ -1113,6 +1113,106 @@ private:
   std::map<ResourceId, LockingImageState> m_ImageStates;
   Threading::CriticalSection m_ImageStatesLock;
 
+  // Immutable capture upload sources, never rendered intermediate results. Raw Vulkan objects
+  // belong to this replay device and are retired after its shutdown barrier.
+  struct InitialUploadCache
+  {
+    struct Entry
+    {
+      VkBuffer source = VK_NULL_HANDLE;
+      VkDeviceSize offset = 0;
+      VkDeviceSize size = 0;
+      VkImage image = VK_NULL_HANDLE;
+      VkDeviceMemory allocation = VK_NULL_HANDLE;
+      rdcarray<VkBufferImageCopy> uploadRegions;
+      rdcarray<VkImageCopy> imageRegions;
+    };
+    bool initialized = false;
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkDeviceSize capacity = 0, used = 0, available = 0;
+    std::map<ResourceId, Entry> entries;
+    std::set<ResourceId> rejected;
+  } m_InitialUploadCache;
+  VkBuffer InitialUploadSource(ResourceId id, const VkInitialContents &initial, VkCommandBuffer cmd,
+                               uint64_t restoreBytes, VkDeviceSize &sourceOffset);
+  void ReleaseInitialUploadCache();
+  bool RestoreInitialImage(ResourceId id, const VkInitialContents &initial, VkCommandBuffer cmd,
+                           VkImage destination, const rdcarray<VkBufferImageCopy> &regions,
+                           uint64_t restoreBytes);
+  bool m_InitialRestoreInFlight = false;
+  bool m_CapturedReplayWorkSubmitted = false;
+  bool m_AllowPreparedReplay = false;
+  bool m_PartialReplayInFlight = false;
+  bool m_PreparedWritesSafeForPartial = false;
+  uint32_t m_ActivePreparedModes = 0;
+  static uint32_t PreparedReplayModes();
+  uint32_t m_PreparedReplayEndEvent = 0;
+  struct FixedHostWriteProof
+  {
+    ResourceId memory;
+    uint64_t offset = 0, size = 0;
+    uint32_t eventId = 0;
+  };
+  std::map<uint64_t, FixedHostWriteProof> m_FixedHostWriteProofs;
+  void RecordFixedHostWriteProof(ReadSerialiser &ser, VkDeviceMemory memory, uint64_t offset,
+                                 uint64_t size);
+  void SkipOverwrittenInitialMemory(ResourceId memory, uint64_t limit,
+                                    Intervals<InitReqType> &requirements);
+  void DrainPreparedReplayBeforeMutation();
+  std::set<VkQueue> m_ReplayCapturedQueues;
+  std::map<ResourceId, Intervals<bool>> m_InitialRestoreHostRanges;
+  std::map<ResourceId, Intervals<bool>> m_InitialRestoreImageHostRanges;
+  VkFence m_InitialRestoreHostFence = VK_NULL_HANDLE;
+  bool m_InitialRestoreHostPrefixSubmitted = false;
+  void SubmitInitialRestoreHostPrefix();
+  bool CanDeferInitialRestore() const;
+  void WaitForCapturedFence(VkDevice device);
+  void WaitForInitialRestoreHostWrite(VkDeviceMemory memory, uint64_t offset, uint64_t size);
+  VkQueryPool m_RestoreTimingQueries = VK_NULL_HANDLE;
+  bool m_RestoreTimingPending = false;
+  void BeginRestoreGPUTiming();
+  void EndRestoreGPUTiming(VkCommandBuffer cmd);
+  void CollectRestoreGPUTiming();
+
+  // Immutable captured host updates; indexed by stream position, never by selected EID.
+  struct ReplayHostWrite
+  {
+    ResourceId memory;
+    uint64_t offset = 0, size = 0, streamBytes = 0, allocationBytes = 0;
+    VkBuffer upload = VK_NULL_HANDLE;
+    VkDeviceMemory allocation = VK_NULL_HANDLE;
+    rdcarray<VkBufferCopy> regions;
+  };
+  std::map<uint64_t, ReplayHostWrite> m_ReplayHostWrites;
+  uint64_t m_ReplayHostWriteBytes = 0;
+  bool ReplayCachedHostWrite(ReadSerialiser &ser, VkDeviceMemory memory, uint64_t offset,
+                             uint64_t size);
+  bool ReplayCachedHostWrite(WriteSerialiser &, VkDeviceMemory, uint64_t, uint64_t)
+  {
+    return false;
+  }
+  void ReleaseReplayHostWrites();
+
+  struct DecodedDescriptorWrites
+  {
+    VkDevice device = VK_NULL_HANDLE;
+    uint64_t bodyOffset = 0, streamBytes = 0;
+    DescUpdateTemplateApplication application;
+    ~DecodedDescriptorWrites() { Deserialise(application); }
+  };
+  std::map<uint64_t, std::unique_ptr<DecodedDescriptorWrites>> m_DecodedDescriptorWrites;
+  uint64_t m_DecodedDescriptorBytes = 0;
+  bool ReplayDecodedDescriptorWrites(ReadSerialiser &ser);
+  bool ReplayDecodedDescriptorWrites(WriteSerialiser &) { return false; }
+  void CacheDecodedDescriptorWrites(ReadSerialiser &ser, VkDevice device, uint64_t bodyOffset,
+                                    DescUpdateTemplateApplication &application);
+  void CacheDecodedDescriptorWrites(WriteSerialiser &, VkDevice, uint64_t,
+                                    DescUpdateTemplateApplication &)
+  {
+  }
+  void ClearDecodedDescriptorWrites();
+
   // find swapchain for an image
   std::map<RENDERDOC_WindowHandle, VkSwapchainKHR> m_SwapLookup;
   Threading::CriticalSection m_SwapLookupLock;
@@ -1163,7 +1263,7 @@ private:
   void DestroyReplayBufferPatches();
   void ApplyReplayBufferPatches(VkCommandBuffer cmd);
   void ApplyReplayBufferMemoryPatches(VkDeviceMemory memory, uint64_t offset, void *data,
-                                       uint64_t size);
+                                      uint64_t size);
   // Native resource versions and the CPU cursor for a bounded primary-command-buffer prefix.
   // Kept separate from presentation snapshots: these are copied back into the original resources.
   struct ReplayCheckpointContent
@@ -1244,7 +1344,7 @@ private:
   ReplayCheckpoint *m_CheckpointFileOrderRestore = NULL;
   uint32_t m_CheckpointSkippedSubmissions = 0, m_CheckpointExecutedSubmissions = 0;
   void ConfigureReplayCheckpoints(const ReplayCheckpointConfig &config,
-                                 const rdcarray<ReplayCheckpointCandidate> &candidates);
+                                  const rdcarray<ReplayCheckpointCandidate> &candidates);
   void InvalidateReplayCheckpoints(uint32_t firstAffectedEvent = 0);
   ReplayCheckpointStats GetReplayCheckpointStats();
   void DestroyReplayCheckpoint(ReplayCheckpoint *checkpoint);
@@ -1259,7 +1359,7 @@ private:
                             ReplayCheckpointKind kind = ReplayCheckpointKind::PartialCommand);
   bool ReplayCheckpointSubmissionSkipped(uint32_t endEventID);
   bool ReplayCheckpointIsProtected(const ReplayCheckpoint &checkpoint,
-                                    const ReplayCheckpoint &building) const;
+                                   const ReplayCheckpoint &building) const;
   bool CopyReplayCheckpointResources(ReplayCheckpoint &checkpoint, bool restore);
   // One actual ordinary replay cursor. It owns no snapshots and is consumed on each request.
   struct LiveForwardState
@@ -1680,7 +1780,8 @@ public:
   void AddPendingCommandBuffer(VkCommandBuffer cmd);
   void AddFreeCommandBuffer(VkCommandBuffer cmd);
   void SubmitCmds(VkSemaphore *unwrappedWaitSemaphores = NULL,
-                  VkPipelineStageFlags *waitStageMask = NULL, uint32_t waitSemaphoreCount = 0);
+                  VkPipelineStageFlags *waitStageMask = NULL, uint32_t waitSemaphoreCount = 0,
+                  VkFence unwrappedCompletionFence = VK_NULL_HANDLE);
   VkSemaphore GetNextSemaphore();
   void SubmitSemaphores();
   void FlushQ();

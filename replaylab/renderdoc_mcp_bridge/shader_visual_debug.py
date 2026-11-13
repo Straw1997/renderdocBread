@@ -16,6 +16,7 @@ import threading
 import time
 import uuid
 import tempfile
+from types import SimpleNamespace
 
 
 SCHEMA = "bread-shader-visual-debug/v1"
@@ -23,9 +24,21 @@ MAX_SOURCE_BYTES = 8 * 1024 * 1024
 MAX_CACHE_BYTES = 64 * 1024 * 1024
 MAX_CACHE_TARGETS = 24
 MAX_PLANS = 12
+MAX_ANALYSIS_TOKENS = 100000
 UNSET_TARGET = 0xffffffff
 RESOURCE_SCOPE = "shader-resource"
 EVENT_SCOPE = "event"
+
+
+def _display_reflection_snapshot(bridge, reflection):
+    """Own only display data; newer bindings intentionally forbid reflection copies.
+
+    ConstantBlock is a value type whose copy owns its nested member arrays.
+    Never retain wrappers borrowed from a Shader that can be replaced/freed.
+    """
+    return SimpleNamespace(rawBytes=bytes(bridge._shader_raw_bytes(reflection)),
+                           constantBlocks=[bridge.rd.ConstantBlock(block)
+                                           for block in reflection.constantBlocks])
 
 
 class DebugError(RuntimeError):
@@ -208,6 +221,8 @@ class Manager(object):
         self._session = None
         self._cache = collections.OrderedDict()
         self._plans = collections.OrderedDict()
+        self._analysis_source = None
+        self._source_model = None
         self._anchors = collections.OrderedDict()
         self._capture = None
         self._source_directories = []
@@ -312,6 +327,8 @@ class Manager(object):
                 self.driver.free(self._cache[key], self._capture)
                 del self._cache[key]
             self._plans.clear()
+            self._source_model = None
+            self._analysis_source = None
             self._anchors.clear()
             for directory in self._source_directories:
                 directory.cleanup()
@@ -391,7 +408,10 @@ class Manager(object):
         if previous is None and scope == RESOURCE_SCOPE and anchor_key in self._anchors:
             anchor = self._anchors[anchor_key]
             previous = {"facts": anchor, "status": "comparing", "restoreState": anchor["restoreState"]}
+        inspect_started = time.perf_counter()
         facts = self.driver.inspect(params, previous=previous)
+        inspect_ms = (time.perf_counter() - inspect_started) * 1000
+        source_started = time.perf_counter()
         facts["scope"] = scope
         if facts["capture"] != self._capture:
             # Old native IDs belong to a destroyed controller. Never pass them
@@ -403,8 +423,23 @@ class Manager(object):
         snapshot = source_snapshot(params)
         if self.instrumenter is None:
             self.instrumenter = _load_instrumenter()
+        language = params.get("language", "hlsl")
+        analysis_source = (facts["capture"], snapshot["unitSha256"], language)
+        if analysis_source != self._analysis_source:
+            # Retain compiled target binaries under their separate byte budget, but discard
+            # old source/model graphs immediately. Different selections share one current model.
+            self._plans.clear()
+            self._source_model = None
+            self._analysis_source = analysis_source
+        needs_preprocess = getattr(self.instrumenter, "needs_preprocess", lambda source: False)
+        preprocess_required = bool(snapshot.get("needsPreprocess") or facts.get("flagsNeedPreprocess") or
+                                   needs_preprocess(snapshot["source"]))
+        prepare_source = getattr(self.instrumenter, "prepare_source", None)
+        if self._source_model is None and callable(prepare_source) and not preprocess_required:
+            self._source_model = prepare_source(snapshot["source"], language=language)
         normalizer = getattr(self.instrumenter, "normalize_selection", None)
-        normalized = (normalizer(snapshot["source"], snapshot["byteStart"], snapshot["byteEnd"])
+        normalized = (normalizer(snapshot["source"], snapshot["byteStart"], snapshot["byteEnd"],
+                                 **({"prepared": self._source_model} if self._source_model else {}))
                       if callable(normalizer) else snapshot)
         plan_key = _digest([snapshot["unitSha256"], normalized["byteStart"], normalized["byteEnd"],
                             params.get("language", "hlsl"), facts["entryPoint"],
@@ -416,8 +451,7 @@ class Manager(object):
         original_selection = None
         if plan is None:
             source, start, end = snapshot["source"], snapshot["byteStart"], snapshot["byteEnd"]
-            needs_preprocess = getattr(self.instrumenter, "needs_preprocess", lambda source: False)
-            if snapshot.get("needsPreprocess") or facts.get("flagsNeedPreprocess") or needs_preprocess(source):
+            if preprocess_required:
                 prepared = self.instrumenter.prepare_preprocess(source, start, end)
                 text = self.driver.preprocess(prepared["source"], params, facts, snapshot)
                 mapped = self.instrumenter.finish_preprocess(text, prepared)
@@ -425,12 +459,16 @@ class Manager(object):
                 original_selection = mapped.get("originalSelection") or prepared.get("originalSelection")
                 preprocessed = True
             plan = self.instrumenter.inspect(source, start, end, language=params.get("language", "hlsl"),
-                entry_point=facts["entryPoint"])
+                entry_point=facts["entryPoint"],
+                **({"prepared": self._source_model} if self._source_model else {}))
             plan["_preprocessed"] = preprocessed
             if original_selection is not None:
                 plan["_originalSelection"] = dict(original_selection)
             self._plans[plan_key] = plan
-            while len(self._plans) > MAX_PLANS:
+            def retained_tokens():
+                models = {id(p["model"]): p["model"] for p in self._plans.values() if "model" in p}
+                return sum(len(model.get("tokens", [])) for model in models.values())
+            while len(self._plans) > MAX_PLANS or (len(self._plans) > 1 and retained_tokens() > MAX_ANALYSIS_TOKENS):
                 self._plans.popitem(last=False)
         else:
             self._plans.move_to_end(plan_key)
@@ -457,7 +495,10 @@ class Manager(object):
                     "anchorEventId": facts["eventId"], "shaderId": facts["shaderId"],
                     "targets": facts["targets"], "selection": selection,
                     "sourceSha256": snapshot["sourceSha256"],
-                    "semantics": "observe-at-expression"}
+                    "semantics": "observe-at-expression",
+                    "timings": {"inspectReplayAndContractMs": inspect_ms,
+                                "sourcePreparationMs": (time.perf_counter() - source_started) * 1000,
+                                "totalMs": (time.perf_counter() - began) * 1000}}
         requested = int(params.get("targetIndex", -1))
         targets = facts["targets"]
         target = next((t for t in targets if t["index"] == requested), None)
@@ -483,6 +524,7 @@ class Manager(object):
         key = _digest([facts["compileIdentity"], plan_key, cache_options, scope])
         cached = self._cache.get(key)
         cache_hit = cached is not None
+        source_ms = (time.perf_counter() - source_started) * 1000
         compiled_at = time.perf_counter()
         if cached is None:
             generated = self.instrumenter.instrument(plan, **options)
@@ -533,6 +575,8 @@ class Manager(object):
             self._session = None
             raise DebugError("superseded", "The preview was cancelled while replaying")
         session["timings"] = {"compileMs": compile_ms,
+                              "inspectReplayAndContractMs": inspect_ms,
+                              "sourcePreparationMs": source_ms,
                               "applyReplayMs": (time.perf_counter() - applied_at) * 1000,
                               "totalMs": (time.perf_counter() - began) * 1000}
         self._evict()
@@ -921,7 +965,7 @@ class ReplayDriver(object):
                     # Own this value: the replay/backend may release its
                     # borrowed reflection after capture close or replacement.
                     "baselineReflection": (previous_facts.get("baselineReflection") if same_session else
-                                           rd.ShaderReflection(baseline)),
+                                           _display_reflection_snapshot(bridge, baseline)),
                     "targetEncoding": (previous_facts.get("targetEncoding", "") if same_session else str(baseline.encoding)),
                     "spirvVersion": spirv_version,
                     "mutationGeneration": int(ctrl.GetShaderReplacementGeneration(event)),
@@ -1094,7 +1138,7 @@ class ReplayDriver(object):
                     allow_fragment_position="unreached-output-checkerboard" in generated.get("warnings", []))
                 return {"target": target, "byteSize": len(raw) + len(bridge._shader_raw_bytes(reflection)),
                         "messages": str(messages or ""), "capture": facts["capture"],
-                        "reflection": rd.ShaderReflection(reflection),
+                        "reflection": _display_reflection_snapshot(bridge, reflection),
                         "rawSha256": _digest(bridge._shader_raw_bytes(reflection))}
             except Exception:
                 ctrl.FreeTargetResource(target)
@@ -1150,7 +1194,7 @@ class ReplayDriver(object):
             captured = owner.get("capturedOriginalReflection")
             raw = bridge._shader_raw_bytes(captured) if captured is not None else b""
             if raw and _digest(raw) == owner.get("expectedOriginalSha256"):
-                source = bridge.rd.ShaderReflection(captured)
+                source = _display_reflection_snapshot(bridge, captured)
         return source
 
     def _register_cbuffer_display_source(self, session, mutation_generation, source):

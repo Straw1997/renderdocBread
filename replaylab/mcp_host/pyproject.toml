@@ -1,6 +1,6 @@
 [project]
 name = "renderdoc-mcp"
-version = "1.46.138"
+version = "1.46.139"
 description = "ReplayLab sidecar host for RenderDocUltra's built-in AI integration, capture analysis, and shader workflows"
 requires-python = ">=3.10"
 dependencies = [

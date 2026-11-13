@@ -27,6 +27,7 @@
 #include "os/os_specific.h"
 #include "replay/replay_timing.h"
 #include "d3d12_api_monitor.h"
+#include "d3d12_commit_audit.inl"
 #include "d3d12_resources.h"
 
 bool WrappedID3D12Device::Serialise_CreateResource(
@@ -35,6 +36,7 @@ bool WrappedID3D12Device::Serialise_CreateResource(
     const D3D12_CLEAR_VALUE *pOptimizedClearValue, UINT NumCastableFormats,
     const DXGI_FORMAT *pCastableFormats, ResourceId pResource, uint64_t gpuAddress)
 {
+  D3D12CommitAudit commitAudit("capturedResource", desc.Width, props.Type, desc.Dimension, pResource);
   rdcarray<DXGI_FORMAT> CastableFormats;
   CastableFormats.assign(pCastableFormats, NumCastableFormats);
 
@@ -382,6 +384,8 @@ HRESULT WrappedID3D12Device::CreateResource(
     ID3D12ProtectedResourceSession *pProtectedSession, UINT NumCastableFormats,
     const DXGI_FORMAT *pCastableFormats, REFIID riidResource, void **ppvResource)
 {
+  D3D12CommitAudit commitAudit("replayResource", desc.Width,
+                               pHeapProperties ? pHeapProperties->Type : 0, desc.Dimension);
   if(riidResource != __uuidof(ID3D12Resource) && riidResource != __uuidof(ID3D12Resource1) &&
      riidResource != __uuidof(ID3D12Resource2))
     return E_NOINTERFACE;

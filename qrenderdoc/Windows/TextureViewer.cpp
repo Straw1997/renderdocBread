@@ -39,6 +39,7 @@
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QStyledItemDelegate>
+#include <QTimer>
 #include <QUuid>
 #include <memory>
 #include "Code/QRDUtils.h"
@@ -663,6 +664,11 @@ TextureViewer::TextureViewer(ICaptureContext &ctx, QWidget *parent)
 {
   ui->setupUi(this);
 
+  m_AnalysisTimer = new QTimer(this);
+  m_AnalysisTimer->setSingleShot(true);
+  m_AnalysisTimer->setInterval(75);
+  QObject::connect(m_AnalysisTimer, &QTimer::timeout, this, &TextureViewer::QueueDeferredAnalysis);
+
   // Keep the native render window in its own page. Qt painting over a native GPU child is not
   // reliable on Windows; the annotation page displays a pinned replay readback instead.
   ui->renderLayout->removeItem(ui->gridLayout);
@@ -908,11 +914,18 @@ TextureViewer::~TextureViewer()
 
   if(m_Output)
   {
-    m_Ctx.Replay().BlockInvoke([this](IReplayController *r) { m_Output->Shutdown(); });
+    m_Ctx.Replay().BlockInvoke([this](IReplayController *r) {
+      for(auto &thumbnail : m_NativeThumbnailOutputs)
+        if(thumbnail.second)
+          thumbnail.second->Shutdown();
+      m_NativeThumbnailOutputs.clear();
+      m_Output->Shutdown();
+    });
   }
 
   m_Ctx.BuiltinWindowClosed(this);
   m_Ctx.RemoveCaptureViewer(this);
+  CompletePresentationWaiters();
   delete ui;
 }
 
@@ -1146,98 +1159,317 @@ void TextureViewer::CapturePresentationWitness()
   setProperty("eidPresentationWitness", image);
 }
 
+void TextureViewer::WhenPresentationReady(uint32_t eventId, std::function<void()> completed)
+{
+  if(!m_Ctx.IsCaptureLoaded() || !m_Output || !isVisible() || m_Ctx.CurEvent() != eventId ||
+     (!m_PresentationPending &&
+      m_CompletedDisplayRequestSerial == m_DisplayRequestSerial.load(std::memory_order_acquire)))
+  {
+    completed();
+    return;
+  }
+  m_PresentationWaiters.push_back(std::move(completed));
+}
+
+void TextureViewer::CompletePresentationWaiters()
+{
+  // Detach before callbacks: a completion can navigate, close a view or request another update.
+  std::vector<std::function<void()>> waiters;
+  waiters.swap(m_PresentationWaiters);
+  for(const auto &completed : waiters)
+    completed();
+}
+
 void TextureViewer::QueueUpdateAndDisplay(bool updateAnalysis)
 {
+  // Capture-close notifications also repaint widgets. They must not create new native outputs
+  // after the close barrier or recreate a preview child whose capture has already been detached.
+  if(!m_Ctx.IsCaptureLoaded() || !m_Output)
+    return;
   if(m_RetargetingRenderTargetHistory || m_UpdatingTextureState)
     return;
 
+  m_AnalysisPending = m_AnalysisPending || updateAnalysis;
+
   QPointer<TextureViewer> self(this);
   m_DisplayRequestSerial.fetch_add(1, std::memory_order_acq_rel);
-  const ViewRequest request = CurrentViewRequest();
+  ViewRequest request = CurrentViewRequest();
+  // i18n-ignore: internal presentation identities used by isolated regression fixtures.
+  ui->render->setProperty("eidRequestedSerial", qulonglong(request.serial));
+  // i18n-ignore: internal presentation-evidence property, never shown to the user.
+  ui->render->setProperty("eidPresentationPending", true);
+  CaptureNativeThumbnailBindings(request);
   m_Ctx.Replay().AsyncInvoke(
       // i18n-ignore: internal replay-request coalescing tag, never shown to the user.
       lit("TextureViewerHistoryDisplay"), [self, request, updateAnalysis](IReplayController *r) {
         if(!self || !self->IsCurrentViewRequest(request) || r->GetCurrentEventID() != request.eventId)
           return;
-        if(request.clearBeforeReveal)
-        {
-          // A hidden native child does not receive its final resize until show(). Clear the old
-          // surface before that show, then bind the final source only after the visible layout is
-          // settled. No history replay or current-event navigation is needed for this clear.
-          TextureDisplay blank = request.display;
-          blank.resourceId = ResourceId();
-          blank.customShaderId = ResourceId();
-          blank.overlay = DebugOverlay::NoOverlay;
-          blank.decodeYUV = false;
-          self->RT_UpdateAndDisplay(r, blank, 0);
-        }
-        else
-        {
-          self->RT_UpdateAndDisplay(r, request.display, request.historyEvent);
-        }
-        if(!self->IsCurrentViewRequest(request))
-          return;
-        if(self->m_Output && r->GetFatalErrorStatus().code == ResultCode::Succeeded)
-        {
-          const rdcpair<int32_t, int32_t> renderedDimensions = self->m_Output->GetDimensions();
-          GUIInvoke::call(qApp, [self, request, updateAnalysis, renderedDimensions]() {
-            if(!self || !self->IsCurrentViewRequest(request) ||
-               self->m_Ctx.CurEvent() != request.eventId)
-              return;
-            if(request.clearBeforeReveal)
-            {
-              // Keep the paint gate and completion identity closed throughout show()/resize.
-              // Those synchronous resize callbacks update fitted scale/scrollbars, but must not
-              // race an intermediate request ahead of the final visible layout.
-              self->m_PresentationSuspended = false;
-              {
-                QScopedValueRollback<bool> retargeting(self->m_RetargetingRenderTargetHistory, true);
-                self->ui->render->show();
-                self->ui->pixelContext->show();
-                self->ui->renderLayout->activate();
-                self->ui->render->layout()->activate();
-                self->ui->pixelContext->layout()->activate();
-              }
-              GUIInvoke::defer(qApp, [self, request, updateAnalysis]() {
-                if(self && self->IsCurrentViewRequest(request) &&
-                   self->m_Ctx.CurEvent() == request.eventId)
-                  self->QueueUpdateAndDisplay(updateAnalysis);
-              });
-              return;
-            }
-            if(self->m_PresentationPending &&
-               !TexturePresentationMatchesCanvas(
-                   renderedDimensions, QSize(self->realRenderWidth(), self->realRenderHeight())))
-            {
-              // A later layout/resize may have overtaken the worker without changing EID. It is
-              // not a completed presentation of this canvas; request the settled dimensions.
-              if(self->ui->render->isVisible())
-                self->QueueUpdateAndDisplay(updateAnalysis);
-              return;
-            }
-            // Open native painting only after this request has actually bound and displayed its
-            // source. A stale callback must not reopen the gate after a newer tab hid the surface.
-            self->ui->render->SetOutputEventId(request.eventId);
-            self->ui->pixelContext->SetOutputEventId(request.eventId);
-            // i18n-ignore: internal completion-evidence property for the replay benchmark.
-            self->ui->render->setProperty("eidDisplayedEvent",
-                                         request.historyEvent ? request.historyEvent : request.eventId);
-            // i18n-ignore: internal completion-evidence property for the replay benchmark.
-            self->ui->render->setProperty("eidDisplayedResource", ToQStr(request.display.resourceId));
-            // i18n-ignore: internal completion-evidence properties for UI regression fixtures.
-            self->ui->render->setProperty("eidPresentationSerial", qulonglong(request.serial));
-            // i18n-ignore: internal completion-evidence properties for UI regression fixtures.
-            self->ui->render->setProperty("eidPresentationPending", false);
-            self->m_PresentationPending = false;
-          });
-        }
-        if(updateAnalysis && !request.clearBeforeReveal)
-        {
-          self->RT_PickPixelsAndUpdate(r, request);
-          self->RT_PickPixelsAndUpdate(r, request, true);
-          self->RT_UpdateVisualRange(r, request);
-        }
+        self->RT_ExecuteDisplayRequest(r, request, updateAnalysis);
       });
+}
+
+void TextureViewer::CaptureNativeThumbnailBindings(ViewRequest &request)
+{
+  // Capture only visible preview bindings on the GUI thread. Their cached native outputs draw
+  // directly from replay textures; no thumbnail pixels or readback buffers cross to Qt.
+  for(ThumbnailStrip *strip : {ui->outputThumbs, ui->inputThumbs})
+  {
+    for(ResourcePreview *preview : strip->thumbs())
+    {
+      if(!preview->isActive() || !preview->isVisible() || preview->visibleRegion().isEmpty())
+        continue;
+      ViewRequest::ThumbnailBinding binding;
+      binding.preview = preview;
+      binding.size = preview->GetThumbSize() * preview->devicePixelRatioF();
+      if(preview->NativePresentationMatches(request.eventSerial, binding.size))
+        continue;
+      binding.window = preview->GetWidgetWindowingData();
+      binding.resource = preview->property("id").value<ResourceId>();
+      binding.subresource = {preview->property("mip").toUInt(), preview->property("slice").toUInt(),
+                             0};
+      binding.typeCast = (CompType)preview->property("cast").toUInt();
+      const TextureDescription *texture = m_Ctx.GetTexture(binding.resource);
+      binding.depth = texture && ((texture->creationFlags & TextureCategory::DepthTarget) ||
+                                  texture->format.compType == CompType::Depth);
+      request.thumbnails.push_back(binding);
+    }
+  }
+}
+
+void TextureViewer::QueueNativeThumbnailRefresh()
+{
+  if(!m_Ctx.IsCaptureLoaded() || !m_Output || m_UpdatingTextureState)
+    return;
+  ViewRequest request = CurrentViewRequest();
+  CaptureNativeThumbnailBindings(request);
+  if(request.thumbnails.empty())
+    return;
+  QPointer<TextureViewer> self(this);
+  // i18n-ignore: coalesced native-preview expose/resize queue; not a new main-image request.
+  m_Ctx.Replay().AsyncInvoke(
+      lit("TextureViewerNativeThumbnails"), [self, request](IReplayController *r) {
+        if(self && self->IsCurrentViewRequest(request) && r->GetCurrentEventID() == request.eventId)
+          self->RT_UpdateNativeThumbnails(r, request);
+      });
+}
+
+void TextureViewer::RT_ExecuteDisplayRequest(IReplayController *r, const ViewRequest &request,
+                                             bool updateAnalysis)
+{
+  QPointer<TextureViewer> self(this);
+  if(request.clearBeforeReveal)
+  {
+    // A hidden native child does not receive its final resize until show(). Clear the old
+    // surface before that show, then bind the final source only after the visible layout is
+    // settled. No history replay or current-event navigation is needed for this clear.
+    TextureDisplay blank = request.display;
+    blank.resourceId = ResourceId();
+    blank.customShaderId = ResourceId();
+    blank.overlay = DebugOverlay::NoOverlay;
+    blank.decodeYUV = false;
+    self->RT_UpdateAndDisplay(r, blank, 0);
+  }
+  else
+  {
+    self->RT_UpdateAndDisplay(r, request.display, request.historyEvent);
+  }
+  if(!self->IsCurrentViewRequest(request))
+    return;
+  if(self->m_Output && r->GetFatalErrorStatus().code == ResultCode::Succeeded)
+  {
+    const rdcpair<int32_t, int32_t> renderedDimensions = self->m_Output->GetDimensions();
+    GUIInvoke::call(qApp, [self, request, updateAnalysis, renderedDimensions]() {
+      if(!self || !self->IsCurrentViewRequest(request) || self->m_Ctx.CurEvent() != request.eventId)
+        return;
+      if(request.clearBeforeReveal)
+      {
+        // Keep the paint gate and completion identity closed throughout show()/resize.
+        // Those synchronous resize callbacks update fitted scale/scrollbars, but must not
+        // race an intermediate request ahead of the final visible layout.
+        self->m_PresentationSuspended = false;
+        {
+          QScopedValueRollback<bool> retargeting(self->m_RetargetingRenderTargetHistory, true);
+          self->ui->render->show();
+          self->ui->pixelContext->show();
+          self->ui->renderLayout->activate();
+          self->ui->render->layout()->activate();
+          self->ui->pixelContext->layout()->activate();
+        }
+        GUIInvoke::defer(qApp, [self, request, updateAnalysis]() {
+          if(self && self->IsCurrentViewRequest(request) && self->m_Ctx.CurEvent() == request.eventId)
+            self->QueueUpdateAndDisplay(updateAnalysis);
+        });
+        return;
+      }
+      if(self->m_PresentationPending &&
+         !TexturePresentationMatchesCanvas(
+             renderedDimensions, QSize(self->realRenderWidth(), self->realRenderHeight())))
+      {
+        // A later layout/resize may have overtaken the worker without changing EID. It is
+        // not a completed presentation of this canvas; request the settled dimensions.
+        if(self->ui->render->isVisible())
+          self->QueueUpdateAndDisplay(updateAnalysis);
+        return;
+      }
+      // Open native painting only after this request has actually bound and displayed its
+      // source. A stale callback must not reopen the gate after a newer tab hid the surface.
+      self->ui->render->SetOutputEventId(request.eventId);
+      self->ui->pixelContext->SetOutputEventId(request.eventId);
+      // i18n-ignore: internal completion-evidence property for the replay benchmark.
+      self->ui->render->setProperty("eidDisplayedEvent",
+                                    request.historyEvent ? request.historyEvent : request.eventId);
+      // i18n-ignore: internal completion-evidence property for the replay benchmark.
+      self->ui->render->setProperty("eidDisplayedResource", ToQStr(request.display.resourceId));
+      // i18n-ignore: internal completion-evidence properties for UI regression fixtures.
+      self->ui->render->setProperty("eidPresentationSerial", qulonglong(request.serial));
+      // i18n-ignore: internal completion-evidence properties for UI regression fixtures.
+      self->ui->render->setProperty("eidPresentationPending", false);
+      self->m_PresentationPending = false;
+    });
+    // Reveal the main image promptly. The full-update completion still joins the native
+    // thumbnail batch and the latest display serial; optional analysis starts afterwards.
+    if(!request.clearBeforeReveal && self->IsCurrentViewRequest(request))
+    {
+      self->RT_UpdateNativeThumbnails(r, request);
+      GUIInvoke::call(qApp, [self, request]() {
+        if(!self || !self->IsCurrentViewRequest(request) ||
+           self->m_Ctx.CurEvent() != request.eventId || self->m_PresentationPending)
+          return;
+        self->m_CompletedDisplayRequestSerial = request.serial;
+        if(self->m_AnalysisPending)
+          self->m_AnalysisTimer->start();
+        self->CompletePresentationWaiters();
+      });
+    }
+  }
+  else
+  {
+    GUIInvoke::call(qApp, [self]() {
+      if(self)
+        self->CompletePresentationWaiters();
+    });
+  }
+}
+
+void TextureViewer::CaptureThumbnailWitnesses()
+{
+  // Explicit diagnostic readback only. Ordinary preview drawing never invokes this slot.
+  if(qEnvironmentVariableIntValue("RENDERDOC_EID_TIMING") != 1 || !m_Ctx.IsCaptureLoaded())
+    return;
+  struct Witness
+  {
+    ResourcePreview *preview;
+    ResourceId resource;
+    QImage image;
+  };
+  std::vector<Witness> witnesses;
+  const uint32_t eventId = m_Ctx.CurEvent();
+  for(ThumbnailStrip *strip : {ui->outputThumbs, ui->inputThumbs})
+    for(ResourcePreview *preview : strip->thumbs())
+      if(preview->isActive() && preview->isVisible() && !preview->visibleRegion().isEmpty())
+        witnesses.push_back({preview, preview->property("id").value<ResourceId>(), QImage()});
+  m_Ctx.Replay().BlockInvoke([this, eventId, &witnesses](IReplayController *r) {
+    if(r->GetCurrentEventID() != eventId)
+      return;
+    for(Witness &witness : witnesses)
+    {
+      auto it = m_NativeThumbnailOutputs.find(witness.preview);
+      if(it == m_NativeThumbnailOutputs.end())
+        continue;
+      const auto dimensions = it->second->GetDimensions();
+      if(dimensions.first <= 0 || dimensions.second <= 0 ||
+         uint64_t(dimensions.first) * dimensions.second > 16 * 1024 * 1024)
+        continue;
+      const bytebuf bytes = it->second->ReadbackOutputTexture();
+      if(bytes.size() != size_t(dimensions.first) * dimensions.second * 3)
+        continue;
+      witness.image = QImage(bytes.data(), dimensions.first, dimensions.second,
+                             dimensions.first * 3, QImage::Format_RGB888)
+                          .copy();
+    }
+  });
+  QVariantList values;
+  for(const Witness &witness : witnesses)
+  {
+    // i18n-ignore: opt-in pixel evidence fields, never user-facing labels.
+    values.push_back(QVariantMap{
+        {lit("resource"),
+         ToQStr(witness.resource)},       // i18n-ignore: diagnostic resource identity key.
+        {lit("event"), eventId},          // i18n-ignore: diagnostic event ID key.
+        {lit("image"), witness.image},    // i18n-ignore: diagnostic image key.
+        {lit("mip"), witness.preview->property("mip")},        // i18n-ignore: diagnostic mip key.
+        {lit("slice"), witness.preview->property("slice")},    // i18n-ignore: diagnostic slice key.
+        {lit("cast"), witness.preview->property("cast")}});    // i18n-ignore: diagnostic type-cast key.
+  }
+  // i18n-ignore: explicitly requested native-surface evidence, consumed only by regression fixtures.
+  setProperty("replayThumbnailWitnesses", values);
+}
+
+void TextureViewer::RT_UpdateNativeThumbnails(IReplayController *r, const ViewRequest &request)
+{
+  for(const ViewRequest::ThumbnailBinding &binding : request.thumbnails)
+  {
+    if(!IsCurrentViewRequest(request) || r->GetCurrentEventID() != request.eventId || !binding.preview)
+      return;
+    IReplayOutput *&output = m_NativeThumbnailOutputs[binding.preview.data()];
+    if(!output)
+      output = r->CreateOutput(binding.window, ReplayOutputType::Texture);
+    if(!output)
+      continue;
+    TextureDisplay display;
+    display.resourceId = binding.resource;
+    display.subresource = binding.subresource;
+    display.typeCast = binding.typeCast;
+    display.red = display.green = display.blue = true;
+    display.alpha = false;
+    display.hdrMultiplier = -1.0f;
+    display.linearDisplayAsGamma = true;
+    display.scale = -1.0f;
+    display.backgroundColor = FloatVector(0.0f, 0.0f, 0.0f, 1.0f);
+    if(binding.typeCast == CompType::SNorm)
+      display.rangeMin = -1.0f;
+    if(binding.depth)
+      display.green = display.blue = false;
+    output->SetTextureDisplay(display);
+    output->Display();
+  }
+  QPointer<TextureViewer> self(this);
+  GUIInvoke::call(this, [self, request]() {
+    if(!self || !self->IsCurrentViewRequest(request))
+      return;
+    for(const ViewRequest::ThumbnailBinding &binding : request.thumbnails)
+      if(binding.preview)
+        binding.preview->MarkNativePresentation(request.eventSerial, binding.size);
+  });
+}
+
+void TextureViewer::QueueDeferredAnalysis()
+{
+  if(!m_Ctx.IsCaptureLoaded() || !isVisible() || !m_Output)
+    return;
+  if(m_Ctx.IsScrubbing())
+  {
+    m_AnalysisTimer->start();
+    return;
+  }
+  const ViewRequest request = CurrentViewRequest();
+  QPointer<TextureViewer> self(this);
+  m_AnalysisPending = false;
+  m_Ctx.Replay().AsyncInvoke(
+      // i18n-ignore: internal coalescing tag for optional idle-time texture analysis.
+      lit("TextureViewerDeferredAnalysis"), [self, request](IReplayController *r) {
+        if(!self || !self->IsCurrentViewRequest(request) || r->GetCurrentEventID() != request.eventId)
+          return;
+        self->RT_PickPixelsAndUpdate(r, request);
+        self->RT_PickPixelsAndUpdate(r, request, true);
+        self->RT_UpdateVisualRange(r, request);
+      });
+}
+
+void TextureViewer::CancelReplayBackgroundWork()
+{
+  if(m_RenderTargetHistory)
+    m_RenderTargetHistory->OnReplayInput();
 }
 
 void TextureViewer::QueuePickPixelsAndUpdate(bool hover)
@@ -2788,7 +3020,7 @@ void TextureViewer::textureTab_Closing(int index)
 
 ResourcePreview *TextureViewer::UI_CreateThumbnail(ThumbnailStrip *strip)
 {
-  ResourcePreview *prev = new ResourcePreview(true);
+  ResourcePreview *prev = new ResourcePreview(m_Ctx, m_Output);
 
   QObject::connect(prev, &ResourcePreview::clicked, this, &TextureViewer::thumb_clicked);
   QObject::connect(prev, &ResourcePreview::doubleClicked, this, &TextureViewer::thumb_doubleClicked);
@@ -3566,48 +3798,12 @@ void TextureViewer::InitResourcePreview(ResourcePreview *prev, Descriptor res, b
 
 void TextureViewer::UI_PreviewResized(ResourcePreview *prev)
 {
-  if(!prev->isActive())
+  if(!prev->isActive() || !prev->isVisible() || m_UpdatingTextureState || !m_Output)
     return;
-
-  QSize s = prev->GetThumbSize();
-  if(s.width() <= 0 || s.height() <= 0)
+  if(prev->NativePresentationMatches(m_EventRequestSerial.load(std::memory_order_acquire),
+                                     prev->GetThumbSize() * prev->devicePixelRatioF()))
     return;
-
-  ResourceId id = prev->property("id").value<ResourceId>();
-  Subresource sub = {0, 0, ~0U};
-  sub.mip = prev->property("mip").toUInt();
-  sub.slice = prev->property("slice").toUInt();
-  CompType typeCast = (CompType)prev->property("cast").toUInt();
-
-  QPointer<TextureViewer> self(this);
-  QPointer<ResourcePreview> preview(prev);
-  const uint64_t eventSerial = m_EventRequestSerial.load(std::memory_order_acquire);
-  const uint64_t requestSerial = prev->BeginThumbRequest();
-  const uint32_t eventId = m_Ctx.CurEvent();
-
-  m_Ctx.Replay().AsyncInvoke(
-      // i18n-ignore: internal per-widget replay-request tag, never shown to the user.
-      lit("preview%1").arg((qulonglong)(void *)prev),
-      [self, preview, s, sub, id, typeCast, requestSerial, eventSerial, eventId](IReplayController *r) {
-        // This check must remain before DrawThumbnail. Event changes and
-        // capture close invalidate the whole pending thumbnail batch, so a
-        // large stale queue drains without touching the GPU or m_Output.
-        if(!self || !preview ||
-           self->m_EventRequestSerial.load(std::memory_order_acquire) != eventSerial ||
-           !preview->IsCurrentThumbRequest(requestSerial) || r->GetCurrentEventID() != eventId ||
-           self->m_Output == NULL)
-          return;
-
-        bytebuf data = self->m_Output->DrawThumbnail(s.width(), s.height(), id, sub, typeCast);
-        std::shared_ptr<bytebuf> copy = std::make_shared<bytebuf>();
-        copy->swap(data);
-        GUIInvoke::call(qApp, [self, preview, s, copy, requestSerial, eventSerial]() {
-          if(self && preview &&
-             self->m_EventRequestSerial.load(std::memory_order_acquire) == eventSerial &&
-             preview->IsCurrentThumbRequest(requestSerial))
-            preview->UpdateThumb(s, *copy);
-        });
-      });
+  QueueNativeThumbnailRefresh();
 }
 
 void TextureViewer::InitStageResourcePreviews(ShaderStage stage,
@@ -4126,6 +4322,10 @@ void TextureViewer::OnCaptureLoaded()
 
 void TextureViewer::Reset()
 {
+  m_AnalysisTimer->stop();
+  m_AnalysisPending = false;
+  // Capture shutdown owns these IReplayOutputs. Reset follows the replay-queue close barrier.
+  m_NativeThumbnailOutputs.clear();
   CloseAIAnnotation();
   m_TemporaryOutputFollowToken = 0;
   m_BeforeTemporaryOutputTab.clear();
@@ -4287,7 +4487,14 @@ void TextureViewer::OnCaptureClosed()
   if(m_RenderTargetHistory)
     m_RenderTargetHistory->Deactivate();
 
-  m_Ctx.Replay().BlockInvoke([](IReplayController *) {});
+  m_Ctx.Replay().BlockInvoke([this](IReplayController *) {
+    // Retire native surfaces while their QWidget handles still exist. The controller owns the
+    // remaining main output until replay shutdown; preview widgets are deleted by Reset below.
+    for(auto &thumbnail : m_NativeThumbnailOutputs)
+      if(thumbnail.second)
+        thumbnail.second->Shutdown();
+    m_NativeThumbnailOutputs.clear();
+  });
 
   Reset();
 
@@ -4308,12 +4515,18 @@ void TextureViewer::OnCaptureClosed()
   ui->viewTexBuffer->setEnabled(false);
 
   UI_UpdateChannels();
+  CompletePresentationWaiters();
 }
 
 void TextureViewer::OnScrubEvent(uint32_t eventId)
 {
+  m_AnalysisTimer->stop();
+  m_AnalysisPending = false;
   m_EventRequestSerial.fetch_add(1, std::memory_order_acq_rel);
   m_DisplayRequestSerial.fetch_add(1, std::memory_order_acq_rel);
+  // A new gesture cancels the old display. Let its navigation cycle advance to the new target;
+  // waiting for a cancelled request here would block the very replay that can replace it.
+  CompletePresentationWaiters();
 
   // Gesture input only cancels obsolete work. The completed event is published through
   // OnEventChanged, which selects its current binding before the output can be presented.
@@ -4395,9 +4608,6 @@ void TextureViewer::OnEventChanged(uint32_t eventId)
 
   // Rebuilding combo boxes emits display signals. Only queue their final coherent state, before
   // the resource-preview batch, while the controller still owns this published event.
-  m_UpdatingTextureState = false;
-  QueueUpdateAndDisplay(true);
-
   UI_CreateThumbnails();
 
   UI_UpdateTextureDetails();
@@ -4581,6 +4791,9 @@ void TextureViewer::OnEventChanged(uint32_t eventId)
 
   if(ui->autoFit->isChecked())
     AutoFitRange();
+  // Publish one coherent visible preview batch after all bindings and final layout are known.
+  m_UpdatingTextureState = false;
+  QueueUpdateAndDisplay(true);
 }
 
 QVariant TextureViewer::persistData()
@@ -5353,6 +5566,9 @@ void TextureViewer::on_debugPixelContext_clicked()
     return;
 
   TextureDescription *texptr = GetCurrentTexture();
+  if(!texptr)
+    return;
+  m_Ctx.CancelReplayBackgroundWork();
 
   int x = MipCoordFromBase(m_PickedPoint.x(), texptr->width);
   int y = MipCoordFromBase(m_PickedPoint.y(), texptr->height);
@@ -5417,6 +5633,7 @@ void TextureViewer::on_pixelHistory_clicked()
 
 void TextureViewer::ShowPixelHistory(bool failedDebug)
 {
+  m_Ctx.CancelReplayBackgroundWork();
   TextureDescription *texptr = GetCurrentTexture();
 
   if(!texptr || !m_Output)

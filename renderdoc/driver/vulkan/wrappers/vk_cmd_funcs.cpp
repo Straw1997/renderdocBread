@@ -6399,6 +6399,7 @@ bool WrappedVulkan::Serialise_vkCmdPushDescriptorSetWithTemplate(
   // we can't serialise pData as-is, since we need to decode to ResourceId for references, etc. The
   // sensible way to do this is to decode the data into a series of writes and serialise that.
   DescUpdateTemplateApplication apply;
+  ScopedDeserialise<SerialiserType, DescUpdateTemplateApplication> cleanup(ser, apply);
 
   if(IsCaptureMode(m_State))
   {
@@ -10135,6 +10136,7 @@ bool WrappedVulkan::Serialise_vkCmdPushDescriptorSetWithTemplate2(
   // we can't serialise pData as-is, since we need to decode to ResourceId for references, etc. The
   // sensible way to do this is to decode the data into a series of writes and serialise that.
   DescUpdateTemplateApplication apply;
+  ScopedDeserialise<SerialiserType, DescUpdateTemplateApplication> cleanup(ser, apply);
 
   if(IsCaptureMode(m_State))
   {

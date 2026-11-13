@@ -84,6 +84,7 @@ namespace
 // i18n-ignore: low-priority replay-queue tag, never shown to the user.
 const rdcstr historyBackgroundTag = "ReplayLab.background.RenderTargetHistory";
 constexpr int MaxCachedThumbnails = 24;
+constexpr uint64_t MaxHistoryImageBytes = 32ULL * 1024 * 1024;
 constexpr int MaxTargetCaches = 8;
 constexpr int ThumbnailPitch = 174;
 constexpr int ThumbnailPrefetchPixels = 2 * ThumbnailPitch;
@@ -559,13 +560,19 @@ struct RenderTargetHistoryView::ThumbnailResult
   bytebuf pixels;
 };
 
+QMap<QString, std::shared_ptr<RenderTargetHistoryView::CacheEntry>>
+    &RenderTargetHistoryView::CacheRegistry()
+{
+  static QMap<QString, std::shared_ptr<CacheEntry>> caches;
+  return caches;
+}
+
 std::shared_ptr<RenderTargetHistoryView::CacheEntry> RenderTargetHistoryView::AcquireCache(
     ICaptureContext &ctx, ResourceId resource, const Subresource &subresource, CompType typeCast)
 {
-  // GUI-thread-only LRU. At most eight inactive/active target entries remain in the process cache,
-  // each with at most 24 images of at most 256x144 RGB pixels (about 21 MiB in total). An evicted
-  // active view/job keeps its shared ownership until it finishes; no replay pointer lives here.
-  static QMap<QString, std::shared_ptr<CacheEntry>> caches;
+  // GUI-thread-only metadata LRU, with a separate global image-byte budget. The virtualized
+  // widget neighborhood is not an image-cache limit: ordinary 74-event histories fit entirely.
+  auto &caches = CacheRegistry();
   static uint64_t useSerial = 0;
   const QString key = HistoryTargetKey(CaptureIdentity(ctx), ToQStr(resource), subresource, typeCast);
   std::shared_ptr<CacheEntry> entry = caches.value(key);
@@ -832,7 +839,8 @@ void RenderTargetHistoryView::OnEventChanged(uint32_t eventId)
   if(isVisible())
   {
     CancelWork();
-    BeginValidation();
+    if(!m_ScrubResumeTimer->isActive())
+      BeginValidation();
   }
 }
 
@@ -845,6 +853,13 @@ void RenderTargetHistoryView::OnScrubEvent(uint32_t eventId)
   UpdateCurrentEventMarkers();
   CancelWork();
   ResumeAfterScrub();
+}
+
+void RenderTargetHistoryView::OnReplayInput()
+{
+  CancelWork();
+  if(isVisible() && m_Cache && m_Ctx.IsCaptureLoaded())
+    m_ScrubResumeTimer->start(750);
 }
 
 void RenderTargetHistoryView::ResumeAfterScrub()
@@ -885,7 +900,6 @@ void RenderTargetHistoryView::StartLoad()
   const std::shared_ptr<ReplayJob> job = std::make_shared<ReplayJob>();
   m_Job = job;
   QPointer<RenderTargetHistoryView> self(this);
-
   m_Ctx.Replay().AsyncInvoke(
       historyBackgroundTag,
       [resource, subresource, cache, job, self](IReplayController *controller) {
@@ -1011,21 +1025,44 @@ void RenderTargetHistoryView::QueueThumbnail(int index)
   setProperty("historyLastRequestedEvent", eventId);
   UpdateDiagnostics();
   QPointer<RenderTargetHistoryView> self(this);
+  QVector<int> indices = {index};
+  // Selected revision first, then bounded ascending groups. Short histories can retain all
+  // their tiny images without retaining full-resolution GPU snapshots.
+  if(index != m_SelectedIndex)
+  {
+    QVector<int> candidates = m_VisibleIndices;
+    bool visibleMissing = false;
+    for(int i : m_VisibleIndices)
+      visibleMissing |= cache->revisions[i].image.isNull() && !cache->revisions[i].unavailable;
+    const uint64_t imageBytes = uint64_t((previewSize.width() * 3 + 3) & ~3) * previewSize.height();
+    if(!visibleMissing && imageBytes &&
+       uint64_t(m_Revisions.size()) <= MaxHistoryImageBytes / imageBytes)
+      for(int i = 0; i < m_Revisions.size(); i++)
+        if(!candidates.contains(i))
+          candidates.push_back(i);
+    for(int i : candidates)
+      if(indices.size() < 24 && !indices.contains(i) && cache->revisions[i].image.isNull() &&
+         !cache->revisions[i].unavailable)
+        indices.push_back(i);
+  }
+  std::sort(indices.begin(), indices.end(),
+            [this](int a, int b) { return m_Revisions[a].eventId < m_Revisions[b].eventId; });
+  rdcarray<uint32_t> events;
+  for(int i : indices)
+    events.push_back(m_Revisions[i].eventId);
 
   // One low-priority job and one local output. It cannot retain a native window or an output
   // awaiting a GUI cleanup handle. Selection/scroll cancellation discards an obsolete result.
   m_Ctx.Replay().AsyncInvoke(
       historyBackgroundTag,
-      [self, cache, job, index, eventId, previewSize, generation, viewGeneration, resource,
-       subresource, typeCast, isDepth](IReplayController *controller) {
+      [self, cache, job, indices, events, index, eventId, previewSize, generation, viewGeneration,
+       resource, subresource, typeCast, isDepth](IReplayController *controller) {
         if(job->cancelled.load())
           return;
-        std::shared_ptr<ThumbnailResult> result = std::make_shared<ThumbnailResult>();
-        result->index = index;
-        result->size = previewSize;
-        result->mutationGeneration = controller->GetShaderReplacementGeneration(0);
-        result->stale = result->mutationGeneration != generation;
-        if(!result->stale)
+        QVector<std::shared_ptr<ThumbnailResult>> results;
+        rdcarray<bytebuf> pixels;
+        const bool stale = controller->GetShaderReplacementGeneration(0) != generation;
+        if(!stale)
         {
           TextureDisplay display;
           display.resourceId = resource;
@@ -1045,20 +1082,34 @@ void RenderTargetHistoryView::QueueThumbnail(int index)
             // event snapshot. DisplayTextureAtEvent restores the live event before returning.
             if(!job->cancelled.load())
             {
-              output->DisplayTextureAtEvent(eventId, display);
-              if(!job->cancelled.load())
-                result->pixels = output->ReadbackOutputTexture();
+              pixels = output->ReadbackTextureAtEvents(events, display,
+                                                       [job]() { return job->cancelled.load(); });
             }
             output->Shutdown();
           }
-          result->stale = controller->GetShaderReplacementGeneration(0) != generation;
         }
-        GUIInvoke::call(qApp, [self, cache, job, result, viewGeneration]() {
+        const size_t completed = pixels.empty() ? 1 : pixels.size();
+        for(int n = 0; n < indices.size() && size_t(n) < completed; n++)
+        {
+          auto result = std::make_shared<ThumbnailResult>();
+          result->index = indices[n];
+          result->size = previewSize;
+          result->mutationGeneration = controller->GetShaderReplacementGeneration(0);
+          result->stale = stale || result->mutationGeneration != generation;
+          if(size_t(n) < pixels.size())
+            result->pixels = std::move(pixels[n]);
+          results.push_back(result);
+        }
+        GUIInvoke::call(qApp, [self, cache, job, results, viewGeneration]() {
           if(!self || job->cancelled.load() || self->m_Job != job || self->m_Cache != cache ||
              self->m_ViewGeneration != viewGeneration)
             return;
           self->m_Job.reset();
-          self->ApplyThumbnail(result);
+          self->m_ApplyingBatch = true;
+          for(const auto &result : results)
+            self->ApplyThumbnail(result);
+          self->m_ApplyingBatch = false;
+          self->ScheduleThumbnailRefresh();
         });
       });
 }
@@ -1246,7 +1297,14 @@ void RenderTargetHistoryView::RefreshVisibleThumbnails()
       cached.lastUsed = ++m_ImageUseSerial;
   }
   if(m_Job && m_Job->index >= 0 && !m_VisibleIndices.contains(m_Job->index))
-    CancelWork();
+    for(int index : m_VisibleIndices)
+      if(m_Cache->revisions[index].image.isNull() && !m_Cache->revisions[index].unavailable)
+      {
+        // Cancel offscreen work only when new visible pixels need the lane. A background prefill
+        // is intentionally offscreen; repeated layout/range notifications must not cancel it.
+        CancelWork();
+        break;
+      }
   PruneThumbnails();
   UpdateDiagnostics();
   QueueNextThumbnail();
@@ -1254,6 +1312,8 @@ void RenderTargetHistoryView::RefreshVisibleThumbnails()
 
 void RenderTargetHistoryView::QueueNextThumbnail()
 {
+  if(m_ApplyingBatch)
+    return;
   if(m_Ctx.IsScrubbing())
   {
     CancelWork();
@@ -1275,6 +1335,16 @@ void RenderTargetHistoryView::QueueNextThumbnail()
       return;
     }
   }
+  const uint64_t imageBytes =
+      uint64_t((m_Cache->previewSize.width() * 3 + 3) & ~3) * m_Cache->previewSize.height();
+  if(!m_VisibleIndices.isEmpty() && imageBytes &&
+     uint64_t(m_Revisions.size()) <= MaxHistoryImageBytes / imageBytes)
+    for(int i = 0; i < m_Cache->revisions.size(); i++)
+      if(m_Cache->revisions[i].image.isNull() && !m_Cache->revisions[i].unavailable)
+      {
+        QueueThumbnail(i);
+        return;
+      }
 }
 
 void RenderTargetHistoryView::PruneThumbnails()
@@ -1282,39 +1352,73 @@ void RenderTargetHistoryView::PruneThumbnails()
   if(!m_Cache)
     return;
   QVector<uint64_t> used;
-  int count = 0;
+  uint64_t bytes = 0;
   for(const CacheEntry::CachedRevision &revision : m_Cache->revisions)
   {
     used.push_back(revision.image.isNull() ? 0 : revision.lastUsed);
-    count += !revision.image.isNull() ? 1 : 0;
+    bytes += uint64_t(revision.image.bytesPerLine()) * revision.image.height();
   }
-  while(count > MaxCachedThumbnails)
+  auto &registry = CacheRegistry();
+  for(const auto &entry : registry)
+    if(entry != m_Cache)
+      for(const auto &revision : entry->revisions)
+        bytes += uint64_t(revision.image.bytesPerLine()) * revision.image.height();
+  // Reclaim images belonging to older targets first, retaining their cheap discovery metadata.
+  for(const auto &entry : registry)
+    if(bytes > MaxHistoryImageBytes && entry != m_Cache)
+      for(auto &revision : entry->revisions)
+      {
+        bytes -= uint64_t(revision.image.bytesPerLine()) * revision.image.height();
+        revision.image = QImage();
+        revision.lastUsed = 0;
+      }
+  while(bytes > MaxHistoryImageBytes)
   {
     const int oldest = OldestThumbnail(used, m_VisibleIndices);
     if(oldest < 0)
       break;
+    const QImage &image = m_Cache->revisions[oldest].image;
+    bytes -= uint64_t(image.bytesPerLine()) * image.height();
     m_Cache->revisions[oldest].image = QImage();
     m_Cache->revisions[oldest].lastUsed = 0;
     used[oldest] = 0;
-    count--;
   }
 }
 
 void RenderTargetHistoryView::UpdateDiagnostics()
 {
-  int cached = 0, widgets = 0;
+  int cached = 0, unavailable = 0, widgets = 0;
+  uint64_t imageBytes = 0;
+  for(const auto &entry : CacheRegistry())
+    for(const auto &revision : entry->revisions)
+      imageBytes += uint64_t(revision.image.bytesPerLine()) * revision.image.height();
   if(m_Cache)
     for(const CacheEntry::CachedRevision &revision : m_Cache->revisions)
+    {
       cached += !revision.image.isNull() ? 1 : 0;
+      unavailable += revision.unavailable ? 1 : 0;
+    }
   for(const Revision &revision : m_Revisions)
     widgets += revision.thumbnail != NULL ? 1 : 0;
   // i18n-ignore: read-only Qt properties for native mouse, cache-bound and scheduling regression tests.
   setProperty("historyRevisionCount", m_Revisions.count());
   setProperty("historyCachedCount", cached);
+  // i18n-ignore: unavailable preview count for completion/error diagnostics.
+  setProperty("historyUnavailableCount", unavailable);
+  // i18n-ignore: byte-budget diagnostics for bounded, process-local preview images.
+  setProperty("historyImageBytes", qulonglong(imageBytes));
+  setProperty("historyImageBudgetBytes", qulonglong(MaxHistoryImageBytes));
   setProperty("historyLiveWidgets", widgets);
   setProperty("historySelectedEvent", SelectedEvent());
   setProperty("historySelectedIndex", m_SelectedIndex);
   setProperty("historyRequestSerial", qulonglong(m_RequestSerial));
+  // i18n-ignore: scheduler diagnostics; these are not user-visible labels.
+  setProperty("historyWorkerActive", bool(m_Job));
+  setProperty("historyScrollPending", m_ScrollPending);
+  setProperty("historyRefreshScheduled", m_RefreshScheduled);
+  setProperty("historyApplyingBatch", m_ApplyingBatch);
+  setProperty("historyVisible", isVisible());
+  setProperty("historyScrubbing", m_Ctx.IsScrubbing());
   // i18n-ignore: read-only generation/validation evidence, not a promise of current GPU state.
   setProperty("historyValidationPending",
               m_Cache && m_Cache->discoveryComplete && m_Job && m_Job->index < 0);

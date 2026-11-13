@@ -14,6 +14,21 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
 
+def test_display_snapshot_owns_nested_layout_without_copying_shader_reflection():
+    def forbidden(*args):
+        raise AssertionError("ShaderReflection construction is intentionally disabled")
+    bridge = SimpleNamespace(rd=SimpleNamespace(ShaderReflection=forbidden,
+                             ConstantBlock=copy.deepcopy),
+                             _shader_raw_bytes=lambda reflection: reflection.rawBytes)
+    source = SimpleNamespace(rawBytes=bytearray(b"original"),
+                             constantBlocks=[SimpleNamespace(members=[1, 2])])
+    owned = mod._display_reflection_snapshot(bridge, source)
+    source.rawBytes[:] = b"replaced"
+    source.constantBlocks[0].members.append(3)
+    assert owned.rawBytes == b"original"
+    assert owned.constantBlocks[0].members == [1, 2]
+
+
 class Instrumenter:
     def __init__(self):
         self.analyses = 0
@@ -569,4 +584,28 @@ def test_default_preview_display_is_custom(environment):
     driver.compile = compile
     assert manager.operation("start", params)["status"] == "active"
     assert generated == ["generated custom"]
+
+
+def test_analysis_model_shares_current_source_and_releases_old_versions(environment):
+    manager, driver, _, params = environment
+    manager.instrumenter = mod._load_instrumenter()
+    source = "float4 main():SV_Target { float x=0.25; float y=x*2; return y; }"
+    request = dict(params, source=source, sourceSha256="", targetIndex=0,
+                   byteStart=source.index("x*2"), byteEnd=source.index("x*2") + 3)
+    assert manager.operation("inspect", request)["status"] == "ready"
+    model = manager._source_model["model"]
+    second = dict(request, requestGeneration=2, byteStart=source.index("return y") + 7,
+                  byteEnd=source.index("return y") + 8)
+    assert manager.operation("inspect", second)["status"] == "ready"
+    assert len(manager._plans) == 2
+    assert all(plan["model"] is model for plan in manager._plans.values())
+    changed = dict(request, requestGeneration=3, source=source.replace("0.25", "0.75"))
+    assert manager.operation("inspect", changed)["status"] == "ready"
+    assert len(manager._plans) == 1 and manager._source_model["model"] is not model
+    prior_capture_model = manager._source_model["model"]
+    driver.capture = "capture-b"
+    assert manager.operation("inspect", dict(changed, requestGeneration=4))["status"] == "ready"
+    assert len(manager._plans) == 1 and manager._source_model["model"] is not prior_capture_model
+    manager.shutdown()
+    assert not manager._plans and manager._source_model is None and manager._analysis_source is None
 

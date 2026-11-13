@@ -33,6 +33,7 @@ class RDHeaderView : public QHeaderView
 {
 private:
   Q_OBJECT
+  Q_PROPERTY(int minimumSectionSize READ minimumSectionSize WRITE setMinimumSectionSize)
 public:
   explicit RDHeaderView(Qt::Orientation orient, QWidget *parent = 0);
   ~RDHeaderView();
@@ -60,6 +61,7 @@ public:
   bool hasGroupTitle(int columnIndex) const;
 
   void setColumnStretchHints(const QList<int> &hints);
+  void setMinimumSectionSize(int size);
 
   void setColumnGroupRole(int role) { m_columnGroupRole = role; }
   int columnGroupRole() const { return m_columnGroupRole; }
@@ -85,6 +87,8 @@ protected:
   void currentChanged(const QModelIndex &current, const QModelIndex &old) override;
 
   void updateGeometries() override;
+  void showEvent(QShowEvent *event) override;
+  void changeEvent(QEvent *event) override;
 
   enum ResizeType
   {
@@ -100,6 +104,8 @@ protected:
   void cacheSections();
   void resizeSectionsWithHints();
   void cacheSectionMinSizes();
+  void invalidateSectionMinSizes();
+  void queueSectionResize();
 
   struct SectionData
   {
@@ -115,6 +121,10 @@ protected:
 
   bool m_suppressSectionCache = false;
   bool m_customSizing = false;
+  bool m_sectionMinSizesDirty = true;
+  int m_cachedMinimumSectionSize = -1;
+  bool m_sectionResizeQueued = false;
+  QMetaObject::Connection m_sectionDataChangedConnection;
 
   QList<int> m_sectionStretchHints;
   QVector<int> m_sectionMinSizes;

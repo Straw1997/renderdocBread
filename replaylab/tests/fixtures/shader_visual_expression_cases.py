@@ -94,6 +94,15 @@ def cases(language, gles=False):
                    (0, 0, 0, 1))
     texture["compilerOnly"] = True
     result.append(texture)
+    if hlsl:
+        array_source = ("struct Input {float4 position:SV_Position;float4 uv[2]:TEXCOORD0;};\n"
+                        "float4 main(Input input):SV_Target0 {float value=input.uv[1].x;"
+                        "return float4(/*observe*/value,0,0,1);}")
+        position = array_source.index("/*observe*/") + len("/*observe*/")
+        result.append({"name": "input-semantic-array-pass-through", "source": array_source,
+                       "byteStart": len(array_source[:position].encode("utf-8")),
+                       "language": "hlsl", "entryPoint": "main", "iteration": 0,
+                       "member": "", "expected": [0, 0, 0, 1], "compilerOnly": True})
     if gles:
         # ESSL forbids the implicit int-to-float intrinsic conversions that
         # desktop GLSL permits. These original inputs do not compile in ESSL;

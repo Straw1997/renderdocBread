@@ -3099,6 +3099,9 @@ bool WrappedVulkan::Serialise_vkUpdateDescriptorSetWithTemplate(
     SerialiserType &ser, VkDevice device, VkDescriptorSet descriptorSet,
     VkDescriptorUpdateTemplate descriptorUpdateTemplate, const void *pData)
 {
+  if(ReplayDecodedDescriptorWrites(ser))
+    return !ser.IsErrored();
+  const uint64_t bodyOffset = ser.IsReading() ? ser.GetReader()->GetOffset() : 0;
   SERIALISE_ELEMENT(device);
   SERIALISE_ELEMENT(descriptorSet).Important();
   SERIALISE_ELEMENT(descriptorUpdateTemplate).Important();
@@ -3106,6 +3109,8 @@ bool WrappedVulkan::Serialise_vkUpdateDescriptorSetWithTemplate(
   // we can't serialise pData as-is, since we need to decode to ResourceId for references, etc. The
   // sensible way to do this is to decode the data into a series of writes and serialise that.
   DescUpdateTemplateApplication apply;
+
+  ScopedDeserialise<SerialiserType, DescUpdateTemplateApplication> cleanup(ser, apply);
 
   if(IsCaptureMode(m_State))
   {
@@ -3130,6 +3135,7 @@ bool WrappedVulkan::Serialise_vkUpdateDescriptorSetWithTemplate(
       writeDesc.dstSet = descriptorSet;
       ReplayDescriptorSetWrite(device, writeDesc);
     }
+    CacheDecodedDescriptorWrites(ser, device, bodyOffset, apply);
   }
 
   return true;

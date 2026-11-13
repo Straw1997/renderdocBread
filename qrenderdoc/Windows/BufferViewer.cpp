@@ -4089,13 +4089,14 @@ void BufferViewer::UI_SetupCBufferLiveEdit()
   m_VLayout->addWidget(edit.panel);
   edit.panel->hide();
   edit.timer = new QTimer(this);
+  edit.timer->setObjectName(QStringLiteral("cbufferLiveSubmitTimer"));
   edit.timer->setSingleShot(true);
-  // Coalesce within one UI frame. A native replay already in flight supplies the remaining
-  // back-pressure; another fixed 80 ms delay only makes the first preview lag behind input.
-  // The legacy switch is for a same-build latency comparison, not a user preference.
-  edit.timer->setInterval(qEnvironmentVariableIntValue("RENDERDOC_CBUFFER_EDIT_LEGACY_REFRESH") == 1
-                              ? 80
-                              : 16);
+  // Merge changes in the current GUI turn without delaying the first preview by a frame.
+  // An in-flight replay already coalesces later inputs through the pending-value map.
+  edit.timer->setInterval(
+      qEnvironmentVariableIntValue("RENDERDOC_CBUFFER_EDIT_LEGACY_REFRESH") == 1
+          ? 80
+          : qBound(0, qEnvironmentVariableIntValue("RENDERDOC_CBUFFER_EDIT_DEBOUNCE_MS"), 80));
   QObject::connect(edit.timer, &QTimer::timeout, this, &BufferViewer::UI_SubmitCBufferLiveValues);
   QObject::connect(ui->fixedVars, &RDTreeWidget::currentItemChanged, this,
                    [this](RDTreeWidgetItem *item, RDTreeWidgetItem *) {
@@ -4474,6 +4475,9 @@ void BufferViewer::UI_QueueCBufferLiveValue(int component)
     values[live.offsets[i]] = bits;
   }
   live.pending[live.key] = values;
+  // Cancel at input time, including while an older value is still replaying. Waiting for its
+  // publication would let an obsolete idle prewarm compete with the newest drag value.
+  m_Ctx.CancelReplayBackgroundWork();
   if(!live.oldestInput.isValid())
     live.oldestInput.start();
   live.newestInput.start();

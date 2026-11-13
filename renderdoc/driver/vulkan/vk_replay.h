@@ -372,9 +372,9 @@ public:
   RDResult ReadLogInitialisation(RDCFile *rdc, bool storeStructuredBuffers);
   void ReplayLog(uint32_t endEventID, ReplayLogType replayType);
   ShaderPairComparison ComparePixelShaderPair(uint32_t eventId, ResourceId expectedOriginal,
-                                             ResourceId baseline, ResourceId candidate) override;
+                                              ResourceId baseline, ResourceId candidate) override;
   void ConfigureReplayCheckpoints(const ReplayCheckpointConfig &config,
-                                 const rdcarray<ReplayCheckpointCandidate> &candidates) override;
+                                  const rdcarray<ReplayCheckpointCandidate> &candidates) override;
   void InvalidateReplayCheckpoints(uint32_t firstAffectedEvent = 0) override;
   ReplayCheckpointStats GetReplayCheckpointStats() override;
   SDFile *GetStructuredFile();
@@ -547,7 +547,7 @@ private:
   void FetchMeshOut(uint32_t eventId, VulkanRenderState &state);
   void ClearPostVSCache();
 
-  void RefreshDerivedReplacements();
+  void RefreshDerivedReplacements(ResourceId changedShader = ResourceId());
   rdcstr RefreshDerivedReplacementsChecked(ResourceId requiredShader = ResourceId());
   void ModifyReplacementIfShaderEXT(ResourceId from, ResourceId &to);
 

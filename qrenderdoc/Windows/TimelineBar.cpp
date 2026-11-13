@@ -189,6 +189,8 @@ void TimelineBar::OnCaptureClosed()
 {
   m_UsageRequests.CaptureChanged();
   m_DisplayedEventID = 0;
+  m_NavigationEventID = 0;
+  m_NavigationPending = false;
   setWindowTitle(tr("Timeline"));
 
   m_HistoryID = ResourceId();
@@ -207,6 +209,8 @@ void TimelineBar::OnCaptureLoaded()
 {
   m_UsageRequests.CaptureChanged();
   m_DisplayedEventID = m_Ctx.CurEvent();
+  m_NavigationEventID = m_DisplayedEventID;
+  m_NavigationPending = false;
   uint32_t frameNumber = m_Ctx.FrameInfo().frameNumber;
 
   if(frameNumber != ~0U)
@@ -226,11 +230,38 @@ void TimelineBar::OnCaptureLoaded()
 void TimelineBar::OnEventChanged(uint32_t eventId)
 {
   m_DisplayedEventID = eventId;
+  // A completed intermediate frame must not pull the input cursor away from a newer target.
+  if(!m_NavigationPending || m_NavigationEventID == eventId)
+  {
+    m_NavigationEventID = eventId;
+    m_NavigationPending = false;
+  }
+  setProperty("navigationCursorEvent", m_NavigationEventID);
   if(!m_HistoryTarget.isEmpty())
     m_HistoryTarget = m_Ctx.GetResourceName(m_HistoryID);
   if(!m_UsageTarget.isEmpty())
     m_UsageTarget = m_Ctx.GetResourceName(m_UsageRequests.resource);
 
+  viewport()->update();
+}
+
+void TimelineBar::OnReplayNavigationRequested(uint32_t eventId)
+{
+  m_NavigationEventID = eventId;
+  // Even returning to the currently displayed EID can supersede an older replay in flight.
+  m_NavigationPending = true;
+  // Diagnostic identity for the actual painted cursor, independent of pipeline publication.
+  setProperty("navigationCursorEvent", m_NavigationEventID);
+  viewport()->update();
+}
+
+void TimelineBar::CancelReplayNavigation()
+{
+  if(!m_NavigationPending)
+    return;
+  m_NavigationPending = false;
+  m_NavigationEventID = m_Ctx.CurEvent();
+  setProperty("navigationCursorEvent", m_NavigationEventID);
   viewport()->update();
 }
 
@@ -629,7 +660,7 @@ void TimelineBar::paintEvent(QPaintEvent *e)
 
   // draw the current label and line
   {
-    uint32_t curEID = m_DisplayedEventID;
+    uint32_t curEID = m_NavigationEventID;
 
     currentRect.setLeft(offsetOf(curEID));
     currentRect.setWidth(

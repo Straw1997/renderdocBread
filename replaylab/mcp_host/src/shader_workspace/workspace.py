@@ -3305,9 +3305,10 @@ class ShaderWorkspaceService:
 
         Native DXIL-ASM workspaces already carry stronger hash-adjacent
         disassembly/assembly provenance in their ordinary route hops.  The
-        independent lane exists specifically so a DXIL -> HLSL -> DXIL route
-        can prove ambiguous CBuffer accesses without treating reconstructed
-        HLSL as ABI evidence.
+        independent lane lets compiled HLSL prove ambiguous CBuffer accesses
+        without treating reconstructed or imported source as ABI evidence.
+        Project imports and compile-only recovery have no decompile hops but
+        still need fresh, hash-bound baseline and candidate disassemblies.
         """
 
         baseline = manifest.get("baseline")
@@ -3319,8 +3320,6 @@ class ShaderWorkspaceService:
             and isinstance(plan, Mapping)
             and plan.get("inputFormat") == "dxil"
             and plan.get("editableFormat") == "hlsl"
-            and isinstance(plan.get("decompile"), list)
-            and bool(plan.get("decompile"))
             and isinstance(plan.get("compile"), list)
             and bool(plan.get("compile"))
         )
@@ -9479,6 +9478,7 @@ class ShaderWorkspaceService:
                 expected_revision = int(manifest.get("revision"))
                 expected_history_operations = {
                     "compile-route-chain",
+                    "compile-native-source",
                     "project-candidate-import",
                 }
                 history_key = "candidateDxilDisassemblyEvidence"
