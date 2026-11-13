@@ -1395,9 +1395,9 @@ void TextureViewer::CaptureThumbnailWitnesses()
     values.push_back(QVariantMap{
         {lit("resource"),    // i18n-ignore: diagnostic resource identity key.
          ToQStr(witness.resource)},
-        {lit("event"), eventId},          // i18n-ignore: diagnostic event ID key.
-        {lit("image"), witness.image},    // i18n-ignore: diagnostic image key.
-        {lit("mip"), witness.preview->property("mip")},        // i18n-ignore: diagnostic mip key.
+        {lit("event"), eventId},                           // i18n-ignore: diagnostic event ID key.
+        {lit("image"), witness.image},                     // i18n-ignore: diagnostic image key.
+        {lit("mip"), witness.preview->property("mip")},    // i18n-ignore: diagnostic mip key.
         {lit("slice"), witness.preview->property("slice")},    // i18n-ignore: diagnostic slice key.
         {lit("cast"), witness.preview->property("cast")}});    // i18n-ignore: diagnostic type-cast key.
   }

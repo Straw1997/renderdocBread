@@ -1377,7 +1377,13 @@ class DxilAccessWorkspaceEvidenceTests(unittest.TestCase):
 
     @staticmethod
     def _revision_publish_denied(staging: Path, destination: Path) -> PermissionError:
-        error = PermissionError(13, "Access is denied", str(staging))
+        class WindowsPublishDenied(PermissionError):
+            # POSIX OSError does not render winerror, even when that attribute
+            # is supplied. Keep the simulated historical Windows record exact
+            # so recovery remains tested on Linux and macOS too.
+            def __str__(self) -> str:
+                return "[WinError 5] Access is denied: %r -> %r" % (self.filename, self.filename2)
+        error = WindowsPublishDenied(13, "Access is denied", str(staging))
         error.winerror = 5
         error.filename2 = str(destination)
         return error
@@ -1400,6 +1406,15 @@ class DxilAccessWorkspaceEvidenceTests(unittest.TestCase):
         with mock.patch.object(Path, "replace", fail_once), mock.patch(
             "src.shader_workspace.workspace.time.sleep", return_value=None
         ):
+            if os.name != "nt":
+                # POSIX permission errors are not Windows sharing violations;
+                # retain the original failure and the preceding valid revision.
+                with self.assertRaises(PermissionError):
+                    service.compile(workspace)
+                self.assertEqual(1, attempts)
+                self.assertEqual(1, json.loads(
+                    (workspace / "manifest.json").read_text(encoding="utf-8"))["revision"])
+                return
             compiled = service.compile(workspace)
 
         self.assertEqual(2, attempts)
