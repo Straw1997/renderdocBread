@@ -2638,9 +2638,37 @@ rdcstr D3D11Replay::SetReplayBufferPatches(const rdcarray<ReplayBufferPatch> &pa
                              D3D11_RESOURCE_MISC_HW_PROTECTED | D3D11_RESOURCE_MISC_RESTRICTED_CONTENT |
                              D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX |
                              D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
-    if((desc.MiscFlags & unsupported) || desc.Usage == D3D11_USAGE_IMMUTABLE ||
-       manager->GetInitialContents(patch.buffer).resource == NULL)
+    if((desc.MiscFlags & unsupported) || desc.Usage == D3D11_USAGE_IMMUTABLE)
       return "D3D11 buffer lacks a restorable ordinary initial-content source";
+    if(manager->GetInitialContents(patch.buffer).resource == NULL)
+    {
+      // Captures omit redundant initial contents for buffers that are only read.
+      // Their current bytes are also their frame-start bytes, but only with a
+      // complete constant-only usage proof. Preserve one GPU source before the
+      // first edit; never read it back or reconstruct it from an edited value.
+      const rdcarray<EventUsage> usages = GetUsage(patch.buffer);
+      bool constantOnly = !usages.empty() && desc.BindFlags == D3D11_BIND_CONSTANT_BUFFER;
+      for(const EventUsage &usage : usages)
+        constantOnly &= usage.usage >= ResourceUsage::VS_Constants &&
+                        usage.usage <= ResourceUsage::All_Constants;
+      const uint64_t budget = 64ULL * 1024 * 1024;
+      const uint64_t accountedBytes = (uint64_t(desc.ByteWidth) + 65535) & ~65535ULL;
+      if(!constantOnly || desc.ByteWidth > 16ULL * 1024 * 1024 ||
+         m_BufferPatchImmutableInitialCount >= 256 ||
+         accountedBytes > budget - m_BufferPatchImmutableInitialBytes)
+        return "D3D11 buffer lacks a restorable ordinary initial-content source";
+      D3D11_BUFFER_DESC sourceDesc = {};
+      sourceDesc.ByteWidth = desc.ByteWidth;
+      sourceDesc.Usage = D3D11_USAGE_DEFAULT;
+      ID3D11Buffer *source = NULL;
+      HRESULT hr = m_pDevice->GetReal()->CreateBuffer(&sourceDesc, NULL, &source);
+      if(FAILED(hr) || !source)
+        return "D3D11 buffer lacks a restorable ordinary initial-content source";
+      m_pImmediateContext->GetReal()->CopyResource(source, (ID3D11Resource *)UnwrapResource(wrapped));
+      manager->SetInitialContents(patch.buffer, D3D11InitialContents(Resource_Buffer, source));
+      m_BufferPatchImmutableInitialBytes += accountedBytes;
+      ++m_BufferPatchImmutableInitialCount;
+    }
     if(descriptions.find(patch.buffer) == descriptions.end())
       scratchBytes += desc.ByteWidth;
     if(scratchBytes > 256ULL * 1024 * 1024)

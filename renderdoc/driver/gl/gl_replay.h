@@ -451,7 +451,7 @@ private:
   uint32_t m_ReplayPatchAnchorEvent = 0;
   struct ReplayCheckpoint;
   bool PrepareReplayCheckpoints();
-  void PrepareCheckpointStaticResources(bool completeContentEvidence);
+  void PrepareCheckpointStaticResources(bool completeBufferEvidence, bool completeTextureEvidence);
   bool SaveReplayCheckpoint(uint32_t eventId);
   bool RestoreReplayCheckpoint(ReplayCheckpoint &checkpoint);
   void ApplyCheckpointBindings(ReplayCheckpoint &checkpoint);
@@ -460,6 +460,9 @@ private:
   uint64_t CheckpointStorageBytes(const ReplayCheckpoint *building, uint64_t &sharedBytes) const;
   ReplayCheckpointConfig m_CheckpointConfig;
   ReplayCheckpointStats m_CheckpointStats;
+  bool m_ReplayPatchReadOnlyEvidence = false;
+  uint64_t m_ReplayPatchImmutableInitialBytes = 0;
+  uint32_t m_ReplayPatchImmutableInitialCount = 0;
   rdcarray<ReplayCheckpointCandidate> m_CheckpointCandidates;
   std::map<uint32_t, std::unique_ptr<ReplayCheckpoint>> m_Checkpoints;
   // Weak references never keep an evicted GPU allocation outside the checkpoint byte budget.

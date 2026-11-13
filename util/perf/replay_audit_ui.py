@@ -1915,7 +1915,15 @@ class ApplicationAudit(object):
     def poll_inline(self):
         pending = self.pending_inline
         if time.perf_counter() - pending['started'] > 30:
-            raise RuntimeError('Inline CBuffer audit timed out at ' + pending['phase'])
+            editor = self.inline_widget.findChild(QtWidgets.QWidget, 'cbufferLiveEditor')
+            spin = self.inline_widget.findChild(QtWidgets.QDoubleSpinBox, 'cbufferLiveValue0')
+            evidence = {'phase': pending['phase'], 'identity': self.inline_identity,
+                        'patchBefore': self.patch_before, 'patchAfter': self.patch_after,
+                        'spin': spin.value() if spin else None,
+                        'properties': {name: editor.property(name) for name in (
+                            'busy', 'pending', 'error', 'lastTiming', 'generation')} if editor else {}}
+            atomic_json(self.directory / 'inline-timeout.json', evidence)
+            raise RuntimeError('Inline CBuffer audit timed out at ' + pending['phase'] + ': ' + repr(evidence))
         tree = self.inline_widget.findChild(QtWidgets.QTreeView, 'fixedVars')
         editor = self.inline_widget.findChild(QtWidgets.QWidget, 'cbufferLiveEditor')
         if tree is None or editor is None:
@@ -1946,6 +1954,10 @@ class ApplicationAudit(object):
             self.inline_spin = spin
             self.inline_previous_timing = editor.property('lastTiming')
             self.inline_before = float(spin.value())
+            if abs(self.inline_before - self.patch_before) > max(1e-5, abs(self.patch_before) * 1e-5):
+                raise RuntimeError('CBuffer raw bytes after texture output disagree with the native editor: ' +
+                                   repr({'raw': self.patch_before, 'editor': self.inline_before,
+                                         'identity': self.inline_identity}))
             if int(self.command.get('settleMs', 0)):
                 pending['phase'] = 'settling'
                 pending['settleUntil'] = time.perf_counter() + int(self.command['settleMs']) / 1000.0

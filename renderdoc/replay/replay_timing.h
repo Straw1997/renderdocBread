@@ -133,6 +133,8 @@ enum class ReplayTimingCounter : uint8_t
   DecodedCommandCacheBytes,
   PreparedModes,
   InitialOverwrittenBytesSkipped,
+  InitialProgramRelinks,
+  InitialProgramRelinksSkipped,
   Count,
 };
 

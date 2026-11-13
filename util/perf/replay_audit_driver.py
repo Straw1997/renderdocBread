@@ -125,7 +125,8 @@ class AuditRun:
         if self.generic_capture:
             environment['BREAD_AUDIT_GENERIC'] = '1'
         overrides = getattr(self, 'environment_overrides', {})
-        if any(not key.startswith(('RENDERDOC_VULKAN_', 'RENDERDOC_D3D12_', 'RENDERDOC_CBUFFER_',
+        if any(not key.startswith(('RENDERDOC_VULKAN_', 'RENDERDOC_D3D12_', 'RENDERDOC_D3D11_',
+                                   'RENDERDOC_GL_', 'RENDERDOC_CBUFFER_',
                                    'RENDERDOC_UI_', 'RENDERDOC_REPLAY_EAGER_MESH_', 'BREAD_AUDIT_')) for key in overrides):
             raise ValueError('Only task-specific diagnostic environment overrides are accepted')
         environment.update(overrides)

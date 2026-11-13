@@ -23,6 +23,7 @@
  ******************************************************************************/
 
 #include <algorithm>
+#include "replay/replay_timing.h"
 #include "gl_driver.h"
 #include "gl_manager.h"
 
@@ -2251,8 +2252,15 @@ void GLResourceManager::Apply_InitialState(GLResource res, GLInitialContents &in
 
     // we need to re-link the program to apply the bindings, as long as it's linkable.
     // See the comment on shaderProgramUnlinkable for more information.
-    if(!prog.shaderProgramUnlinkable && changedBindings)
+    static const bool forceRelink =
+        Process::GetEnvVariable("RENDERDOC_GL_FORCE_INITIAL_PROGRAM_RELINK") == "1";
+    if(!prog.shaderProgramUnlinkable && (changedBindings || forceRelink))
+    {
+      AddReplayTimingCounter(ReplayTimingCounter::InitialProgramRelinks);
       GL.glLinkProgram(res.name);
+    }
+    else
+      AddReplayTimingCounter(ReplayTimingCounter::InitialProgramRelinksSkipped);
 
     PerStageReflections stages;
     m_Driver->FillReflectionArray(Id, stages);

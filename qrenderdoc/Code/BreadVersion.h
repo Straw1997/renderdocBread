@@ -3,10 +3,10 @@
 #include "../../renderdoc/api/replay/version.h"
 
 // i18n-ignore: Build/version identifiers, never translatable prose.
-#define BREAD_VERSION_STRING "1.46.139"
-#define BREAD_FULL_VERSION_STRING "v1.46.139"
-#define BREAD_FILE_VERSION 1, 46, 139, 0
-#define BREAD_FILE_VERSION_STRING "1.46.139.0"
+#define BREAD_VERSION_STRING "1.46.140"
+#define BREAD_FULL_VERSION_STRING "v1.46.140"
+#define BREAD_FILE_VERSION 1, 46, 140, 0
+#define BREAD_FILE_VERSION_STRING "1.46.140.0"
 #if RENDERDOC_VERSION_MAJOR != 1 || RENDERDOC_VERSION_MINOR != 46
 #error Bread version is stale: run replaylab/packaging/version_policy.py --write
 #endif
