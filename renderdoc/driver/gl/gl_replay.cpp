@@ -705,6 +705,21 @@ bool GLCheckpointContentEvidenceComplete(GLChunk chunk)
          effect == GLCheckpointBufferEffect::ExplicitBufferWrite;
 }
 
+bool GLPatchInitialBufferEvidenceComplete(GLChunk chunk)
+{
+  if(chunk == GLChunk::SwapBuffers || chunk == GLChunk::glFlush || chunk == GLChunk::glFinish)
+    return true;
+  if(GLCheckpointContentEvidenceComplete(chunk))
+    return true;
+  // Texture parameter changes and framebuffer/image copies cannot write an
+  // ordinary UBO. Buffer/texture aliases are rejected separately by the patch
+  // binding proof. Do not weaken texture checkpoint sharing to admit these.
+  const GLCheckpointTextureEffect effect = GLCheckpointClassifyTextureEffect(chunk);
+  return effect == GLCheckpointTextureEffect::StateOnly ||
+         effect == GLCheckpointTextureEffect::BoundFramebuffer ||
+         effect == GLCheckpointTextureEffect::ExplicitDestination;
+}
+
 bool GLCheckpointShareOriginalContents(bool completeEvidence, bool potentialWrite,
                                        bool aliasUncertain, bool edited)
 {
@@ -1127,6 +1142,7 @@ bool GLReplay::PrepareReplayCheckpoints()
     return reject("OpenGL checkpoint safety scan requires structured capture chunks");
   bool frame = false;
   bool completeContentEvidence = true;
+  bool completeBufferEvidence = true;
   uint32_t contextChanges = 0;
   for(const SDChunk *chunk : file->chunks)
   {
@@ -1151,6 +1167,9 @@ bool GLReplay::PrepareReplayCheckpoints()
     if(chunk->metadata.chunkID >= (uint32_t)SystemChunk::FirstDriverChunk &&
        !GLCheckpointContentEvidenceComplete(type))
       completeContentEvidence = false;
+    if(chunk->metadata.chunkID >= (uint32_t)SystemChunk::FirstDriverChunk &&
+       !GLPatchInitialBufferEvidenceComplete(type))
+      completeBufferEvidence = false;
   }
   if(!frame)
     return reject("OpenGL checkpoint safety scan could not locate the frame boundary");
@@ -1177,17 +1196,20 @@ bool GLReplay::PrepareReplayCheckpoints()
           "OpenGL compressed checkpoint resource needs an unsupported driver copy workaround");
   }
   PrepareCheckpointStaticResources(
-      completeContentEvidence && m_pDriver->m_ReplayCheckpointBufferWrites.complete &&
-      Process::GetEnvVariable("RENDERDOC_GL_DISABLE_STATIC_CHECKPOINT_SHARING") != "1");
+      completeBufferEvidence && m_pDriver->m_ReplayCheckpointBufferWrites.complete &&
+          Process::GetEnvVariable("RENDERDOC_GL_DISABLE_STATIC_CHECKPOINT_SHARING") != "1",
+      completeContentEvidence &&
+          Process::GetEnvVariable("RENDERDOC_GL_DISABLE_STATIC_CHECKPOINT_SHARING") != "1");
   m_CheckpointPrepared = true;
   m_CheckpointStats.reason.clear();
   return true;
 }
 
-void GLReplay::PrepareCheckpointStaticResources(bool completeContentEvidence)
+void GLReplay::PrepareCheckpointStaticResources(bool completeBufferEvidence,
+                                                bool completeTextureEvidence)
 {
   m_CheckpointStaticResources.clear();
-  if(!completeContentEvidence)
+  if(!completeBufferEvidence && !completeTextureEvidence)
     return;
   GLResourceManager *manager = m_pDriver->GetResourceManager();
   std::set<ResourceId> attachedTextures, aliasedBuffers, editedBuffers;
@@ -1229,7 +1251,7 @@ void GLReplay::PrepareCheckpointStaticResources(bool completeContentEvidence)
       auto info = m_pDriver->m_Buffers.find(id);
       if(info != m_pDriver->m_Buffers.end() &&
          GLCheckpointShareOriginalContents(
-             true,
+             completeBufferEvidence,
              info->second.replayPatchUnsafe ||
                  bool(info->second.creationFlags & BufferCategory::ReadWrite) ||
                  m_pDriver->m_ReplayCheckpointBufferWrites.buffers.count(id) != 0,
@@ -1241,7 +1263,7 @@ void GLReplay::PrepareCheckpointStaticResources(bool completeContentEvidence)
       auto info = m_pDriver->m_Textures.find(id);
       if(info != m_pDriver->m_Textures.end() &&
          GLCheckpointShareOriginalContents(
-             true,
+             completeTextureEvidence,
              bool(info->second.creationFlags &
                   (TextureCategory::ColorTarget | TextureCategory::DepthTarget |
                    TextureCategory::ShaderReadWrite | TextureCategory::SwapBuffer)) ||
@@ -2606,6 +2628,11 @@ void GLReplay::SetReplayData(GLWindowingData data)
 
 void GLReplay::GetBufferData(ResourceId buff, uint64_t offset, uint64_t len, bytebuf &ret)
 {
+  // Texture display/readback can leave an output/debug context current. Buffer
+  // reads must observe the replay context's command stream and binding namespace,
+  // just like FillCBufferVariables and the other resource read paths.
+  MakeCurrentReplayContext(&m_ReplayCtx);
+
   if(m_pDriver->m_Buffers.find(buff) == m_pDriver->m_Buffers.end())
   {
     RDCWARN("Requesting data for non-existant buffer %s", ToStr(buff).c_str());
@@ -7597,6 +7624,8 @@ rdcstr GLReplay::SetReplayBufferPatches(const rdcarray<ReplayBufferPatch> &patch
     else
     {
       bool frame = false;
+      bool completeContentEvidence = true;
+      rdcstr incompleteContentChunk;
       uint32_t contexts = 0;
       for(const SDChunk *chunk : file->chunks)
       {
@@ -7605,12 +7634,32 @@ rdcstr GLReplay::SetReplayBufferPatches(const rdcarray<ReplayBufferPatch> &patch
         if(!frame)
           continue;
         const GLChunk type = GLChunk(chunk->metadata.chunkID);
-        if(type == GLChunk::ImplicitThreadSwitch ||
-           ((type == GLChunk::MakeContextCurrent || type == GLChunk::ContextConfiguration) &&
-            ++contexts > 1))
+        if(type == GLChunk::MakeContextCurrent || type == GLChunk::ContextConfiguration)
+        {
+          if(++contexts > 1)
+            m_pDriver->m_ReplayPatchCaptureError =
+                "OpenGL buffer patches currently require one capture context";
+          continue;
+        }
+        if(chunk->metadata.chunkID >= (uint32_t)SystemChunk::FirstDriverChunk &&
+           !GLPatchInitialBufferEvidenceComplete(type))
+        {
+          completeContentEvidence = false;
+          if(incompleteContentChunk.empty())
+            incompleteContentChunk = chunk->name;
+        }
+        if(type == GLChunk::ImplicitThreadSwitch)
           m_pDriver->m_ReplayPatchCaptureError =
               "OpenGL buffer patches currently require one capture context";
       }
+      m_ReplayPatchReadOnlyEvidence =
+          frame && completeContentEvidence && m_pDriver->m_ReplayCheckpointBufferWrites.complete;
+      if(Process::GetEnvVariable("RENDERDOC_EID_TIMING") == "1")
+        AppendReplayTimingLog(StringFormat::Fmt(
+            "api=GLPatchInitialProof frame=%u complete=%u writesComplete=%u firstUnknown=%s",
+            frame ? 1U : 0U, completeContentEvidence ? 1U : 0U,
+            m_pDriver->m_ReplayCheckpointBufferWrites.complete ? 1U : 0U,
+            incompleteContentChunk.c_str()));
     }
   }
   if(!patches.empty() && !m_pDriver->m_ReplayPatchCaptureError.empty())
@@ -7636,7 +7685,53 @@ rdcstr GLReplay::SetReplayBufferPatches(const rdcarray<ReplayBufferPatch> &patch
     const uint64_t nativeLimit = sizeof(GLintptr) == 4 ? 0x7fffffffULL : 0x7fffffffffffffffULL;
     if(patch.byteOffset > nativeLimit || patch.data.size() > nativeLimit - patch.byteOffset)
       return "OpenGL patch range exceeds the replay process native buffer offset range";
-    const GLInitialContents initial = rm->GetInitialContents(patch.buffer);
+    GLInitialContents initial = rm->GetInitialContents(patch.buffer);
+    const uint64_t initialCharge = (info.size + 65535) & ~65535ULL;
+    if(initial.resource.name == 0 && m_ReplayPatchReadOnlyEvidence &&
+       m_pDriver->m_ReplayCheckpointBufferWrites.buffers.count(patch.buffer) == 0 && info.size > 0 &&
+       info.size <= 16ULL * 1024 * 1024 && m_ReplayPatchImmutableInitialCount < 256 &&
+       initialCharge <= 64ULL * 1024 * 1024 - m_ReplayPatchImmutableInitialBytes &&
+       GL.glCopyBufferSubData && GL.glGenBuffers && GL.glBufferData && GL.glGetBufferParameteriv)
+    {
+      // A read-only UBO's current bytes are its immutable frame-start contents.
+      // Keep a bounded GPU copy before editing; ordinary initial restoration then
+      // also handles undo and navigation without any CPU data readback.
+      for(uint32_t attempt = 0; attempt < 8 && GL.glGetError() != eGL_NONE; ++attempt)
+      {
+      }
+      if(GL.glGetError() == eGL_NONE)
+      {
+        GLint read = 0, write = 0;
+        GL.glGetIntegerv(eGL_COPY_READ_BUFFER_BINDING, &read);
+        GL.glGetIntegerv(eGL_COPY_WRITE_BUFFER_BINDING, &write);
+        GLuint source = 0;
+        GL.glGenBuffers(1, &source);
+        GL.glBindBuffer(eGL_COPY_WRITE_BUFFER, source);
+        GL.glBufferData(eGL_COPY_WRITE_BUFFER, GLsizeiptr(info.size), NULL, eGL_STATIC_COPY);
+        GLint allocated = 0;
+        GL.glGetBufferParameteriv(eGL_COPY_WRITE_BUFFER, eGL_BUFFER_SIZE, &allocated);
+        bool valid = source != 0 && uint64_t(allocated) == info.size && GL.glGetError() == eGL_NONE;
+        if(valid)
+        {
+          GL.glBindBuffer(eGL_COPY_READ_BUFFER, live.name);
+          GL.glCopyBufferSubData(eGL_COPY_READ_BUFFER, eGL_COPY_WRITE_BUFFER, 0, 0,
+                                 GLsizeiptr(info.size));
+          valid = GL.glGetError() == eGL_NONE;
+        }
+        GL.glBindBuffer(eGL_COPY_READ_BUFFER, GLuint(read));
+        GL.glBindBuffer(eGL_COPY_WRITE_BUFFER, GLuint(write));
+        valid &= GL.glGetError() == eGL_NONE;
+        if(valid)
+        {
+          initial = GLInitialContents(BufferRes(m_pDriver->GetCtx(), source), uint32_t(info.size));
+          rm->SetInitialContents(patch.buffer, initial);
+          m_ReplayPatchImmutableInitialBytes += initialCharge;
+          ++m_ReplayPatchImmutableInitialCount;
+        }
+        else if(source)
+          GL.glDeleteBuffers(1, &source);
+      }
+    }
     if(initial.resource.name == 0 || initial.bufferLength < patch.byteOffset + patch.data.size())
       return "OpenGL patch requires immutable captured initial buffer contents for clear";
     total += patch.data.size();
@@ -9014,6 +9109,15 @@ TEST_CASE("OpenGL static checkpoint sharing requires complete frame content evid
   CHECK_FALSE(GLCheckpointContentEvidenceComplete(GLChunk::glTextureSubImage2DEXT));
   CHECK_FALSE(GLCheckpointContentEvidenceComplete(GLChunk::glGenerateMipmap));
   CHECK_FALSE(GLCheckpointContentEvidenceComplete(GLChunk(0xffffffffU)));
+  CHECK(GLPatchInitialBufferEvidenceComplete(GLChunk::glDrawArrays));
+  CHECK(GLPatchInitialBufferEvidenceComplete(GLChunk::glCopyBufferSubData));
+  CHECK(GLPatchInitialBufferEvidenceComplete(GLChunk::glTexParameteri));
+  CHECK(GLPatchInitialBufferEvidenceComplete(GLChunk::glBlitFramebuffer));
+  CHECK(GLPatchInitialBufferEvidenceComplete(GLChunk::SwapBuffers));
+  CHECK(GLPatchInitialBufferEvidenceComplete(GLChunk::glFlush));
+  CHECK(GLPatchInitialBufferEvidenceComplete(GLChunk::glFinish));
+  CHECK_FALSE(GLPatchInitialBufferEvidenceComplete(GLChunk::glReadPixels));
+  CHECK_FALSE(GLPatchInitialBufferEvidenceComplete(GLChunk(0xffffffffU)));
 
   CHECK(GLCheckpointShareOriginalContents(true, false, false, false));
   CHECK_FALSE(GLCheckpointShareOriginalContents(false, false, false, false));

@@ -213,6 +213,8 @@ const char *counterNames[] = {
     "decodedCommandCacheBytes",
     "preparedModes",
     "initialOverwrittenBytesSkipped",
+    "initialProgramRelinks",
+    "initialProgramRelinksSkipped",
 };
 static_assert(ARRAY_COUNT(sectionNames) == (size_t)ReplayTimingSection::Count,
               "Every timing section must have a stable log key");

@@ -639,3 +639,29 @@ Compare controls on the same machine/binary/settings and report GPU contention.
 A per-stage timer moving earlier does not establish an end-to-end improvement.
 Game output can itself be nondeterministic; report repeated reference stability
 separately from cache-vs-reference differences.
+
+### D3D11 and OpenGL/GLES acceptance
+
+`replay_audit_all_api.py --label LABEL --runtime RUNTIME --capture CAPTURE`
+compares actual EID navigation with stable forced references and native output
+presentation in a disposable profile. `--mutations` exercises the native CBuffer
+editor, 120 timed inputs, and byte/pixel restoration. Intermediate input values
+may coalesce; report the final input-to-publication latency separately from the
+duration of the drag and the observer's polling delay.
+
+OpenGL/GLES restores pending attribute/output bindings and uniforms even when
+unchanged linked locations let it skip relinking. Use `--force-program-relink`
+for a same-binary control. Buffer-only write evidence is independent of texture
+write evidence; unknown writes and aliases still prevent static sharing.
+
+D3D11 and OpenGL/GLES may preserve a GPU initial source before editing a proven
+frame-read-only constant buffer whose capture omitted initial contents. These
+sources are capture-owned, limited to 256 objects and 64 MiB charged in 64 KiB
+units, with a 16 MiB per-buffer limit. Subsequent values reuse the source; edited
+results and dependent checkpoints retain their existing invalidation rules.
+
+`d3d11_initial_restore_fixture.cpp` supplies an owned native fixture with many
+constant-buffer consumers. The audit's `--initial-command-cache` flag is only
+for a separately supplied experimental runtime and requires real native hits;
+the proposed D3D11 initial-command-list experiment is not enabled or included in
+the production driver because complete UI timing showed no reliable gain.

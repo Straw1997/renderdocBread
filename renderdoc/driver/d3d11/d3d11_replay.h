@@ -455,6 +455,8 @@ private:
   // After editing, recorded usage is no longer proof that a replacement shader cannot write.
   bool m_CheckpointConservativeWrites = false;
   rdcarray<ReplayBufferPatch> m_BufferPatches;
+  uint64_t m_BufferPatchImmutableInitialBytes = 0;
+  uint32_t m_BufferPatchImmutableInitialCount = 0;
   std::map<ResourceId, ID3D11Buffer *> m_BufferPatchScratch;
   bool m_BufferPatchesDirty = false;
   std::map<ResourceId, uint32_t> m_BufferPatchFirstConsumers;
