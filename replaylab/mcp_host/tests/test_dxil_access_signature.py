@@ -807,7 +807,9 @@ class DxilAccessWorkspaceEvidenceTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(
             dir=os.environ.get("RENDERDOC_ULTRA_TEST_TEMP", None)
         )
-        self.root = Path(self.temporary.name)
+        # Private evidence helpers receive the canonical root established by
+        # public workspace entry points, including Windows short TEMP paths.
+        self.root = Path(self.temporary.name).resolve()
         self.script = self.root / "route_tool.py"
         self.script.write_text(ROUTE_TOOL, encoding="utf-8")
         self.fixed_ir = self.root / "fixed.ll"
