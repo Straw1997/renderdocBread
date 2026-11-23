@@ -218,6 +218,8 @@ for line in sys.stdin:
         )
     elif method == "account/logout":
         send({"id": request_id, "result": {}})
+    elif method == "config/read":
+        send({"id": request_id, "result": {"config": {"mcp_servers": {}}}})
     elif method == "permissionProfile/list":
         assert message["params"]["cwd"]
         assert message["params"]["limit"] == 100

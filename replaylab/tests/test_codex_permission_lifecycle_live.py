@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -14,24 +15,50 @@ from replaylab_agent.agent_context import ProviderContext, harden_codex_argv
 from replaylab_agent.agent_report import TaskReportStore
 from replaylab_agent.connectors.codex_app_server import CodexAppServerConnector
 from replaylab_agent.native_mcp import build_native_mcp_route, native_codex_argv
+from replaylab_agent.process_env import external_agent_environment
 from replaylab_agent.profiles import Profile
 
 
+CODEX = os.environ.get("REPLAYLAB_TEST_CODEX_EXECUTABLE") or shutil.which("codex")
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("include_default,with_bread,writable",
-                         [(False, False, True), (True, False, True), (True, True, True), (True, False, False)],
-                         ids=["missing-thread-default", "no-mcp", "bread-mcp", "read-only"])
-@pytest.mark.skipif(os.environ.get("REPLAYLAB_TEST_REAL_CODEX") != "1" or not shutil.which("codex"),
+@pytest.mark.parametrize(
+    "include_default,with_bread,writable,foreign_mcp",
+    [
+        pytest.param(False, False, True, None, id="missing-thread-default"),
+        pytest.param(True, False, True, None, id="no-mcp"),
+        pytest.param(True, True, True, None, id="bread-mcp"),
+        pytest.param(True, True, True, "stdio-enabled", id="node-repl-enabled"),
+        pytest.param(True, True, True, "stdio-disabled", id="node-repl-disabled"),
+        pytest.param(True, True, True, "http-enabled", id="node-repl-http"),
+        pytest.param(True, False, False, None, id="read-only"),
+    ],
+)
+@pytest.mark.skipif(os.environ.get("REPLAYLAB_TEST_REAL_CODEX") != "1" or not CODEX,
                     reason="opt-in installed Codex lifecycle check; no remote model calls")
-async def test_real_codex_named_permissions_survive_mcp_reload_and_followup(tmp_path: Path, include_default: bool, with_bread: bool, writable: bool):
+async def test_real_codex_named_permissions_survive_mcp_reload_and_followup(
+    tmp_path: Path, include_default: bool, with_bread: bool, writable: bool,
+    foreign_mcp: str | None,
+):
     requests = []
     seen_tools, tool_outputs, tool_result_text = [], [], []
+    foreign_launch_marker = tmp_path / "node-repl-started"
 
     class ResponsesHandler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
+        def do_GET(self):
+            if self.path == "/node-repl":
+                foreign_launch_marker.touch()
+            self.send_error(404)
+
         def do_POST(self):
+            if self.path == "/node-repl":
+                foreign_launch_marker.touch()
+                self.send_error(404)
+                return
             payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             # Retain no request body or headers. Only synthetic keys can be used
             # because both CODEX_HOME and provider env_key are isolated below.
@@ -83,26 +110,64 @@ async def test_real_codex_named_permissions_survive_mcp_reload_and_followup(tmp_
             self.end_headers()
             self.wfile.write(body)
 
-    owned, profile = tmp_path / "owned", tmp_path / "codex-home"
+    owned = tmp_path / "owned"
     owned.mkdir()
-    profile.mkdir()
+    profile = Profile(id="native", preset="codex")
+    synthetic_api_key = "sk-bread-local-test-not-a-real-key"
+    environment = external_agent_environment(
+        profile,
+        extra={"BREAD_LOCAL_TEST_KEY": "synthetic-test-key", "OPENAI_API_KEY": synthetic_api_key,
+               "CODEX_API_KEY": synthetic_api_key},
+        environ={**os.environ, "LOCALAPPDATA": str(tmp_path / "local-app-data")},
+    )
+    codex_home = Path(environment["CODEX_HOME"])
+    codex_home.mkdir(parents=True)
+    config = codex_home / "config.toml"
+    original_config = "# This managed Codex profile already exists.\n"
+    if writable:
+        # Older Codex records workspace trust during a write-scoped turn. Seed
+        # its owned fixture entry so the check can detect changes to the config.
+        project_key = json.dumps(os.path.normcase(str(owned)), ensure_ascii=False)
+        original_config += f'[projects.{project_key}]\ntrust_level = "trusted"\n'
+    if foreign_mcp in {"stdio-enabled", "stdio-disabled"}:
+        launch_probe = tmp_path / "node_repl_probe.py"
+        launch_probe.write_text(
+            "from pathlib import Path\n"
+            "import sys\n"
+            "Path(sys.argv[1]).touch()\n",
+            encoding="utf-8",
+        )
+        original_config += (
+            "\n[mcp_servers.node_repl]\n"
+            f"command = {json.dumps(sys.executable, ensure_ascii=False)}\n"
+            f"args = {json.dumps([str(launch_probe), str(foreign_launch_marker)], ensure_ascii=False)}\n"
+            f"enabled = {'true' if foreign_mcp == 'stdio-enabled' else 'false'}\n"
+        )
     store = None
     route = None
     if with_bread:
         store = TaskReportStore("real-codex-mcp", tmp_path / "events")
         store.begin_task_review("a" * 64)
-        context = ProviderContext(profile=Profile(id="native", preset="codex"), task_id="real-codex-mcp",
+        context = ProviderContext(profile=profile, task_id="real-codex-mcp",
                                   model="", instance_id="", context={}, intent=None)
         route = build_native_mcp_route(context, workspace=owned, event_root=tmp_path / "events", allowed_effects=())
         assert route is not None and "--host" not in route.args
-    (profile / "auth.json").write_text(json.dumps({
-        "auth_mode": "apikey", "OPENAI_API_KEY": "sk-bread-local-test-not-a-real-key",
-    }), encoding="utf-8")
+    auth_file = codex_home / "auth.json"
+    original_auth = json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": synthetic_api_key}).encode("utf-8")
+    auth_file.write_bytes(original_auth)
     server = ThreadingHTTPServer(("127.0.0.1", 0), ResponsesHandler)
+    if foreign_mcp == "http-enabled":
+        original_config += (
+            "\n[mcp_servers.node_repl]\n"
+            f'url = "http://127.0.0.1:{server.server_port}/node-repl"\n'
+            "enabled = true\n"
+        )
+    original_config_bytes = original_config.encode("utf-8")
+    config.write_bytes(original_config_bytes)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
-    argv = (native_codex_argv([shutil.which("codex"), "app-server"], route) if route is not None
-            else harden_codex_argv([shutil.which("codex"), "app-server"]))
+    argv = (native_codex_argv([CODEX, "app-server"], route) if route is not None
+            else harden_codex_argv([CODEX, "app-server"]))
     settings = [
         'cli_auth_credentials_store="file"',
         'model_provider="bread_local_test"',
@@ -119,8 +184,7 @@ async def test_real_codex_named_permissions_survive_mcp_reload_and_followup(tmp_
     argv[index:index] = [value for setting in settings for value in ("-c", setting)]
     connector = CodexAppServerConnector(argv, cwd=owned, workspace_write=writable, timeout=20,
         expected_mcp_servers=frozenset({"Bread"}) if with_bread else frozenset(),
-        env={**os.environ, "CODEX_HOME": str(profile), "BREAD_LOCAL_TEST_KEY": "synthetic-test-key",
-             "OPENAI_API_KEY": "sk-bread-local-test-not-a-real-key", "CODEX_API_KEY": "sk-bread-local-test-not-a-real-key"})
+        env=environment)
     if not include_default:
         profile_config = connector._owned_workspace_profile_config
         connector._owned_workspace_profile_config = lambda: {
@@ -155,6 +219,7 @@ async def test_real_codex_named_permissions_survive_mcp_reload_and_followup(tmp_
         assert calls.count("thread/start") == 1 and calls.count("turn/start") == 2
         assert calls.count("mcpServerStatus/list") >= 3
         assert len(requests) == (3 if with_bread else 2) and all(path == "/v1/responses" for path, _ in requests)
+        assert not any("node_repl" in name for name in seen_tools)
         connector._verify_thread_read_scope(scopes[0], [str(owned)])
         if with_bread:
             assert "call_bread_review" in tool_outputs, (seen_tools, tool_outputs)
@@ -170,3 +235,6 @@ async def test_real_codex_named_permissions_survive_mcp_reload_and_followup(tmp_
         server.shutdown()
         server.server_close()
         server_thread.join()
+    assert not foreign_launch_marker.exists()
+    assert config.read_bytes() == original_config_bytes
+    assert auth_file.read_bytes() == original_auth

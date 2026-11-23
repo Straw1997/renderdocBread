@@ -69,6 +69,42 @@ async def test_app_query_errors_do_not_trigger_legacy_fallback(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "name,pinned,metadata,allowed",
+    [
+        ("node_repl", True, {"runtimeStatus": "disabled"}, True),
+        ("node_repl", True, {}, True),
+        ("node_repl", False, {"runtimeStatus": "disabled"}, False),
+        ("node_repl", True, {"runtimeStatus": "connected"}, False),
+        ("node_repl", True, {"runtimeStatus": "starting"}, False),
+        ("node_repl", True, {"runtimeStatus": None}, False),
+        ("node_repl", True, {"runtimeStatus": "disabled", "tools": {"js": {}}}, False),
+        ("node_repl", True, {"serverInfo": {"name": "node_repl", "version": "1"}}, False),
+        ("ambient", False, {"runtimeStatus": "disabled"}, False),
+    ],
+)
+async def test_scoped_inventory_accepts_only_pinned_inactive_node_repl(
+    tmp_path, name, pinned, metadata, allowed
+):
+    connector = CodexAppServerConnector(["unused"], cwd=tmp_path, expected_mcp_servers={"Bread"})
+    connector._disabled_node_repl_names = frozenset({"node_repl"} if pinned else ())
+
+    async def request(method, params, **kwargs):
+        if method == "mcpServerStatus/list":
+            extra = {"name": name, "tools": {}, "serverInfo": None, **metadata}
+            return {"data": [legacy_server(), extra], "nextCursor": None}
+        assert method == "app/installed"
+        return {"apps": []}
+
+    connector._transport.request = request
+    if allowed:
+        await connector._verify_tool_isolation("thread")
+    else:
+        with pytest.raises(PolicyError, match=name):
+            await connector._verify_tool_isolation("thread")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("invalid", ["entry", "cursor"])
 async def test_legacy_app_inventory_rejects_malformed_pages(tmp_path, invalid):
     connector = CodexAppServerConnector(["unused"], cwd=tmp_path)
