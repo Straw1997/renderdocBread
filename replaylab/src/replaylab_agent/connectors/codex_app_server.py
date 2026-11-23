@@ -1221,6 +1221,7 @@ class CodexAppServerConnector:
         self._initialized = False
         self._run_lock = asyncio.Lock()
         self._active_thread_id = ""
+        self._disabled_node_repl_names: frozenset[str] | None = None
 
     async def __aenter__(self) -> CodexAppServerConnector:
         # Construction and context entry are deliberately lazy; run() starts the
@@ -1234,6 +1235,8 @@ class CodexAppServerConnector:
         await self._transport.close()
         self._initialized = False
         self._active_thread_id = ""
+        self._disabled_node_repl_names = None
+        self._transport.command = self.command
 
     def _materialize_attachment_inputs(
         self, attachments: Sequence[ProviderBinaryAttachment]
@@ -1666,6 +1669,8 @@ class CodexAppServerConnector:
         async with self._run_lock:
             try:
                 await self._initialize()
+                if not self.inherit_desktop_capabilities:
+                    await self._disable_scoped_node_repl()
                 account_state = await self._read_account_state(on_timeline=on_timeline)
                 if account_state.get("account") is None:
                     raise AuthenticationError(
@@ -2260,6 +2265,45 @@ class CodexAppServerConnector:
                 error_code=_READ_SCOPE_UNVERIFIED,
             )
 
+    async def _configured_node_repl(self) -> dict[str, bool]:
+        result = await self._transport.request(
+            "config/read", {"cwd": str(self.cwd), "includeLayers": False},
+            timeout=min(self.timeout, 30.0),
+        )
+        config = result.get("config")
+        servers = config.get("mcp_servers", {}) if isinstance(config, dict) else None
+        if not isinstance(servers, dict):
+            raise ConnectorError("Codex returned an invalid MCP configuration")
+        enabled = {}
+        for name, server in servers.items():
+            if name.lower() != "node_repl":
+                continue
+            value = server.get("enabled", True) if isinstance(server, dict) else None
+            if not isinstance(value, bool):
+                raise ConnectorError("Codex returned an invalid node_repl configuration")
+            enabled[name] = value
+        return enabled
+
+    async def _disable_scoped_node_repl(self) -> None:
+        if self._disabled_node_repl_names is not None:
+            return
+        configured = await self._configured_node_repl()
+        if configured:
+            # Pin the process settings before the first thread can launch this
+            # desktop service. A flag-only override for a missing entry is
+            # invalid TOML config to Codex because it has no MCP transport.
+            index = self.command.index("app-server")
+            overrides = tuple(
+                value for name in configured for value in ("-c", f"mcp_servers.{name}.enabled=false")
+            )
+            await self.close()
+            self._transport.command = (*self.command[:index], *overrides, *self.command[index:])
+            await self._initialize()
+            effective = await self._configured_node_repl()
+            if effective.keys() != configured.keys() or any(effective.values()):
+                raise PolicyError("Codex could not verify node_repl is disabled for the Bread task")
+        self._disabled_node_repl_names = frozenset(configured)
+
     async def _list_thread_mcp_servers(
         self, thread_id: str, *, deadline: float
     ) -> dict[str, dict[str, Any]]:
@@ -2397,6 +2441,18 @@ class CodexAppServerConnector:
                 if duplicates:
                     raise _UnscopedBreadServers(duplicates)
             unexpected = actual_servers - self.expected_mcp_servers
+            if "node_repl" in unexpected and self._disabled_node_repl_names:
+                entry = entries["node_repl"]
+                # Codex 0.142.1 also lists disabled configurations but omits
+                # runtimeStatus. Only accept a process-pinned entry that has
+                # no initialized server metadata or exposed tools.
+                if (
+                    entry["name"] in self._disabled_node_repl_names
+                    and entry.get("runtimeStatus", "disabled") == "disabled"
+                    and entry.get("serverInfo") is None
+                    and entry.get("tools") == {}
+                ):
+                    unexpected -= {"node_repl"}
             if unexpected and not self.inherit_desktop_capabilities:
                 if not self.expected_mcp_servers:
                     raise PolicyError(
