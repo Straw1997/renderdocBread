@@ -15,8 +15,8 @@ permission requests and terminal/file callbacks as a fail-closed boundary.
 * **Cursor**: handled by ``process_env.ensure_cursor_workspace`` (permissions).
 * **CodeBuddy**: handled on the preset command line (``--tools ""``).
 * **Copilot**: exact ``--available-tools`` / ``--allow-tool`` launch options.
-* **Kimi**: a per-turn explicit Agent file containing only the exact task MCP
-  tools, selected with ``--agent-file``.
+* **Kimi**: a project-scoped main Agent override containing only the exact task
+  MCP tools, with ``--agent-file`` retained for CLI compatibility.
 * **custom**: the client-side denial layer alone applies.
 """
 
@@ -247,12 +247,19 @@ def write_gemini_settings(
     )
 
 
-def write_kimi_agent(workspace: Path, allowed_tools: Sequence[str]) -> Path:
-    """Create a launch-scoped Kimi Agent whose visible tools are task exact."""
+def _kimi_agent_path(workspace: Path) -> Path:
+    return workspace / ".kimi-code" / "agents" / "agent.md"
 
-    settings_dir = workspace / ".kimi-code"
-    settings_dir.mkdir(parents=True, exist_ok=True)
-    target = settings_dir / "replaylab-agent.md"
+
+def write_kimi_agent(workspace: Path, allowed_tools: Sequence[str]) -> Path:
+    """Override Kimi's main Agent in this task's workspace.
+
+    The ACP entry point loads project Agent definitions independently of
+    the CLI's root-level ``--agent-file`` option.
+    """
+
+    target = _kimi_agent_path(workspace)
+    target.parent.mkdir(parents=True, exist_ok=True)
     tool_lines = [
         f"  - {json.dumps(_kimi_mcp_tool_name(name), ensure_ascii=True)}"
         for name in ordered_tool_names(allowed_tools)
@@ -260,8 +267,9 @@ def write_kimi_agent(workspace: Path, allowed_tools: Sequence[str]) -> Path:
     tools = "tools: []" if not tool_lines else "tools:\n" + "\n".join(tool_lines)
     target.write_text(
         "---\n"
-        "name: replaylab\n"
+        "name: agent\n"
         "description: Bread AI task-scoped RenderDoc analysis agent\n"
+        "override: true\n"
         + tools
         + "\nsubagents: []\n"
         "---\n\n"
@@ -333,7 +341,7 @@ def runtime_argv(
             )
         )
     elif profile.preset == "kimi-acp":
-        agent_file = workspace / ".kimi-code" / "replaylab-agent.md"
+        agent_file = _kimi_agent_path(workspace)
         try:
             acp_index = result.index("acp")
         except ValueError:
@@ -390,7 +398,7 @@ def describe(profile: Profile) -> str:
     if preset == "copilot-acp":
         return "copilot: exact Bread MCP tools via launch-only available/allow lists"
     if preset == "kimi-acp":
-        return "kimi: launch-scoped Agent file exposes exact Bread MCP tools only"
+        return "kimi: task workspace Agent override allows exact Bread MCP tools only"
     if preset == "cursor-acp":
         return "cursor: .cursor/cli.json permissions"
     if preset == "codebuddy-acp":
