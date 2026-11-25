@@ -72,7 +72,7 @@ class MCPServerConfig:
     url: str = ""
     note: str = ""
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, *, portable_paths: bool = True) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "id": self.id,
             "title": self.title or self.id,
@@ -80,8 +80,8 @@ class MCPServerConfig:
             "transport": self.transport,
         }
         if self.transport == "stdio":
-            payload["command"] = fold_tool_path(self.command)
-            payload["args"] = [fold_tool_path(item) for item in self.args]
+            payload["command"] = fold_tool_path(self.command) if portable_paths else self.command
+            payload["args"] = [fold_tool_path(item) for item in self.args] if portable_paths else list(self.args)
             payload["env"] = dict(self.env)
         else:
             payload["url"] = self.url
@@ -435,7 +435,8 @@ def servers_for_directory(servers: Iterable[MCPServerConfig]) -> list[dict[str, 
 
 
 def servers_for_runtime(servers: Sequence[MCPServerConfig]) -> tuple[dict[str, Any], ...]:
-    return tuple(server.to_dict() for server in servers)
+    """Pass the validated launch paths to the MCP process."""
+    return tuple(server.to_dict(portable_paths=False) for server in servers)
 
 
 def mcp_server_runtime_status(
