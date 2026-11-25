@@ -197,8 +197,10 @@ def test_kimi_uses_a_per_turn_exact_tool_agent(tmp_path: Path) -> None:
     workspace.mkdir()
     prepare_workspace(profile, workspace, ("inspect_event", "report_task_result"))
 
-    agent = workspace / ".kimi-code" / "replaylab-agent.md"
+    agent = workspace / ".kimi-code" / "agents" / "agent.md"
     text = agent.read_text(encoding="utf-8")
+    assert "name: agent\n" in text
+    assert "override: true\n" in text
     assert "description: Bread AI task-scoped RenderDoc analysis agent" in text
     assert "description: ReplayLab task-scoped" not in text
     assert 'mcp__Bread__inspect_event' in text
