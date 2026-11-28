@@ -99,6 +99,32 @@ def test_offline_add_edit_and_default_are_readable_by_the_backend(native):
     assert store.profiles["test-local"].models == ["model-b"]
 
 
+def test_model_inference_options_round_trip_and_clear(native):
+    result = native(
+        "profile", "add", "tunable", "--preset", "openai",
+        "--allowed-model", "model-a", "--default-model", "model-a",
+        "--option", "reasoning_effort=high",
+        "--option", "max_output_tokens=16384",
+        "--option", "context_window_tokens=131072", "--json",
+    )
+    assert result["exitCode"] == 0, result
+    profile = ProfileStore(native.path).load().profiles["tunable"]
+    assert profile.options == {
+        "reasoning_effort": "high",
+        "max_output_tokens": 16384,
+        "context_window_tokens": 131072,
+    }
+
+    result = native(
+        "profile", "update", "tunable", "--allowed-model", "model-a",
+        "--default-model", "model-a", "--clear-option", "reasoning_effort",
+        "--clear-option", "max_output_tokens", "--clear-option",
+        "context_window_tokens", "--json",
+    )
+    assert result["exitCode"] == 0, result
+    assert ProfileStore(native.path).load().profiles["tunable"].options == {}
+
+
 def test_legacy_profile_and_unrelated_metadata_survive_edit(native):
     native.path.parent.mkdir(parents=True)
     profile = {"id": "old", "preset": "ollama", "model": "legacy", "options": {"temperature": 0.25}}

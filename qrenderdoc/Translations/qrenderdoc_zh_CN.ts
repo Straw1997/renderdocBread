@@ -446,19 +446,19 @@
 <context>
     <name>AIAssistant</name>
     <message>
-        <location filename="../Windows/AI/AIAssistant.cpp" line="+11484"/>
+        <location filename="../Windows/AI/AIAssistant.cpp" line="+11547"/>
         <source>Loading Skills...</source>
         <translation>正在加载技能……</translation>
     </message>
     <message>
-        <location line="-7192"/>
-        <location line="+7246"/>
+        <location line="-7255"/>
+        <location line="+7309"/>
         <source>Skills</source>
         <translation>技能</translation>
     </message>
     <message>
-        <location line="-7241"/>
-        <location line="+7270"/>
+        <location line="-7304"/>
+        <location line="+7333"/>
         <source>MCP servers</source>
         <translation>MCP 服务器</translation>
     </message>
@@ -517,7 +517,7 @@
         <translation>参数（每行一个）</translation>
     </message>
     <message>
-        <location line="-8285"/>
+        <location line="-8348"/>
         <source>Type @ to load a Skill or MCP server for this message (@skill:&lt;id&gt;, @mcp:&lt;id&gt;).</source>
         <translation>输入 @ 可为本条消息加载技能或 MCP 服务器（@skill:&lt;id&gt;、@mcp:&lt;id&gt;）。</translation>
     </message>
@@ -1023,14 +1023,14 @@
         <location line="+226"/>
         <location line="+47"/>
         <location line="+1779"/>
-        <location line="+5958"/>
+        <location line="+6021"/>
         <location line="+708"/>
         <location line="+41"/>
         <source>New conversation</source>
         <translation>新建对话</translation>
     </message>
     <message>
-        <location line="-10692"/>
+        <location line="-10755"/>
         <source>Starting...</source>
         <translation>正在启动…</translation>
     </message>
@@ -1149,12 +1149,12 @@
     </message>
     <message>
         <location line="+311"/>
-        <location line="+8291"/>
+        <location line="+8354"/>
         <source>Running</source>
         <translation>正在运行</translation>
     </message>
     <message>
-        <location line="-8277"/>
+        <location line="-8340"/>
         <source>%1 capture action(s) running</source>
         <translation>正在运行 %1 个捕获操作</translation>
     </message>
@@ -1223,13 +1223,13 @@
         <location line="-3912"/>
         <location line="+453"/>
         <location line="+3467"/>
-        <location line="+5629"/>
+        <location line="+5692"/>
         <location line="+297"/>
         <source>This action requires an open capture.</source>
         <translation>此操作需要打开一个捕获。</translation>
     </message>
     <message>
-        <location line="-11063"/>
+        <location line="-11126"/>
         <source>Tencent CodeBuddy / Hunyuan Subscription (ACP)</source>
         <comment>provider.codebuddy-acp.title</comment>
         <translation>腾讯 CodeBuddy / 混元订阅（ACP）</translation>
@@ -1405,18 +1405,18 @@
     <message>
         <location line="+35"/>
         <location line="+153"/>
-        <location line="+2564"/>
+        <location line="+2627"/>
         <source>AI host was not found</source>
         <translation>找不到 AI 主机</translation>
     </message>
     <message>
-        <location line="-2491"/>
-        <location line="+1918"/>
+        <location line="-2554"/>
+        <location line="+1950"/>
         <source>Command timed out</source>
         <translation>命令超时</translation>
     </message>
     <message>
-        <location line="-2026"/>
+        <location line="-2058"/>
         <source>Command failed with exit code %1</source>
         <translation>命令失败，退出代码为 %1</translation>
     </message>
@@ -1455,11 +1455,13 @@
         <location line="+34"/>
         <location line="+271"/>
         <location line="+2"/>
+        <location line="+204"/>
+        <location line="+12"/>
         <source>Provider default</source>
         <translation>提供商默认值</translation>
     </message>
     <message>
-        <location line="-157"/>
+        <location line="-373"/>
         <source>Active connection: %1</source>
         <translation>当前连接：%1</translation>
     </message>
@@ -1490,21 +1492,21 @@
     </message>
     <message>
         <location line="+1"/>
-        <location line="+2108"/>
+        <location line="+2171"/>
         <location line="+39"/>
         <location line="+32"/>
         <source>Edit...</source>
         <translation>编辑…</translation>
     </message>
     <message>
-        <location line="-2178"/>
-        <location line="+2147"/>
+        <location line="-2241"/>
+        <location line="+2210"/>
         <location line="+32"/>
         <source>Remove</source>
         <translation>移除</translation>
     </message>
     <message>
-        <location line="-2178"/>
+        <location line="-2241"/>
         <source>Set as Default</source>
         <translation>设为默认值</translation>
     </message>
@@ -2162,18 +2164,18 @@ Size: %2 bytes</source>
     </message>
     <message>
         <location line="+7"/>
-        <location line="+203"/>
+        <location line="+235"/>
         <source>Checking for a saved credential...</source>
         <translation>正在检查已保存的凭据…</translation>
     </message>
     <message>
-        <location line="-202"/>
-        <location line="+197"/>
+        <location line="-234"/>
+        <location line="+229"/>
         <source>No saved credential yet. Enter a key to save it securely.</source>
         <translation>尚无已保存的凭据。输入密钥以安全保存。</translation>
     </message>
     <message>
-        <location line="-196"/>
+        <location line="-228"/>
         <source>Forget Saved Key</source>
         <translation>删除已保存的密钥</translation>
     </message>
@@ -2250,25 +2252,25 @@ Size: %2 bytes</source>
     </message>
     <message>
         <location line="+2"/>
-        <location line="+373"/>
+        <location line="+405"/>
         <location line="+430"/>
         <source>Connect / Sign in and Test</source>
         <translation>连接/登录并测试</translation>
     </message>
     <message>
-        <location line="-802"/>
-        <location line="+58"/>
+        <location line="-834"/>
+        <location line="+89"/>
         <source>Cancel</source>
         <translation>取消</translation>
     </message>
     <message>
-        <location line="-49"/>
-        <location line="+348"/>
+        <location line="-80"/>
+        <location line="+380"/>
         <source>I trust this custom ACP command to run as a local process</source>
         <translation>我信任此自定义 ACP 命令作为本地进程运行</translation>
     </message>
     <message>
-        <location line="-344"/>
+        <location line="-376"/>
         <source>Agent command</source>
         <translation>Agent 命令</translation>
     </message>
@@ -2289,32 +2291,32 @@ Size: %2 bytes</source>
     </message>
     <message>
         <location line="+3"/>
-        <location line="+255"/>
+        <location line="+287"/>
         <source>Fetch the provider&apos;s model list, then enable only the models you want to switch between. You can also add an exact model or deployment name manually.</source>
         <translation>获取提供商的模型列表，然后仅启用希望在其间切换的模型。也可以手动添加精确的模型名称或部署名称。</translation>
     </message>
     <message>
-        <location line="-246"/>
-        <location line="+453"/>
+        <location line="-278"/>
+        <location line="+485"/>
         <location line="+147"/>
         <source>Fetch Models</source>
         <translation>获取模型</translation>
     </message>
     <message>
-        <location line="-598"/>
-        <location line="+246"/>
+        <location line="-630"/>
+        <location line="+278"/>
         <location line="+140"/>
         <source>Exact model or deployment name</source>
         <translation>精确的模型名称或部署名称</translation>
     </message>
     <message>
-        <location line="-385"/>
+        <location line="-417"/>
         <source>Add</source>
         <translation>添加</translation>
     </message>
     <message>
         <location line="+3"/>
-        <location line="+483"/>
+        <location line="+515"/>
         <location line="+14"/>
         <location line="+19"/>
         <location line="+15"/>
@@ -2323,7 +2325,7 @@ Size: %2 bytes</source>
         <translation>测试模型</translation>
     </message>
     <message>
-        <location line="-533"/>
+        <location line="-565"/>
         <source>Send one short prompt to the selected model to confirm the whole link works. This uses a small amount of your subscription quota.</source>
         <translation>向所选模型发送一条简短提示，确认整条链路可用。这会消耗少量订阅额度。</translation>
     </message>
@@ -2333,7 +2335,7 @@ Size: %2 bytes</source>
         <translation>默认模型</translation>
     </message>
     <message>
-        <location line="+117"/>
+        <location line="+149"/>
         <source>Saved credential status is unavailable.</source>
         <translation>已保存凭据的状态不可用。</translation>
     </message>
@@ -2384,8 +2386,8 @@ Size: %2 bytes</source>
         <translation>请先保存此连接，再存储提供商凭据。</translation>
     </message>
     <message>
-        <location line="-212"/>
-        <location line="+230"/>
+        <location line="-213"/>
+        <location line="+231"/>
         <location line="+843"/>
         <source>Save</source>
         <translation>保存</translation>
@@ -2481,12 +2483,12 @@ Size: %2 bytes</source>
     </message>
     <message>
         <location line="+11"/>
-        <location line="+1910"/>
+        <location line="+1941"/>
         <source>Testing...</source>
         <translation>正在测试…</translation>
     </message>
     <message>
-        <location line="-1887"/>
+        <location line="-1918"/>
         <source>%1 responded successfully to a short test prompt. The link works.</source>
         <translation>%1 已成功响应一条测试提示，链路可用。</translation>
     </message>
@@ -2569,12 +2571,12 @@ Account: %1</source>
     <message>
         <location line="+9"/>
         <location line="+360"/>
-        <location line="+758"/>
+        <location line="+789"/>
         <source>Test Connection</source>
         <translation>测试连接</translation>
     </message>
     <message>
-        <location line="-1108"/>
+        <location line="-1139"/>
         <source>Authentication status unavailable</source>
         <translation>身份验证状态不可用</translation>
     </message>
@@ -2717,12 +2719,12 @@ Device code: %1</source>
         <translation>正在取消连接设置…</translation>
     </message>
     <message>
-        <location line="+110"/>
+        <location line="+113"/>
         <source>Choose Set as Default on another connection to change the default.</source>
         <translation>要更改默认连接，请在另一个连接上选择“设为默认值”。</translation>
     </message>
     <message>
-        <location line="+60"/>
+        <location line="+65"/>
         <source>AI Connection</source>
         <translation>AI 连接</translation>
     </message>
@@ -2772,7 +2774,7 @@ Device code: %1</source>
         <translation>请输入新选择的提供商的密钥。绝不会跨提供商重复使用凭据。</translation>
     </message>
     <message>
-        <location line="+66"/>
+        <location line="+89"/>
         <source>Custom ACP</source>
         <translation>自定义 ACP</translation>
     </message>
@@ -2823,7 +2825,7 @@ Device code: %1</source>
         <translation>默认连接</translation>
     </message>
     <message>
-        <location line="-2434"/>
+        <location line="-2497"/>
         <source>AI Connection Check</source>
         <translation>AI 连接检查</translation>
     </message>
@@ -2834,7 +2836,7 @@ Device code: %1</source>
         <translation>命令输出超出安全限制</translation>
     </message>
     <message>
-        <location line="+4252"/>
+        <location line="+4315"/>
         <location line="+746"/>
         <source>Add or select an AI connection first.</source>
         <translation>请先添加或选择 AI 连接。</translation>
@@ -2933,7 +2935,7 @@ Device code: %1</source>
         <translation>捕获桥接尚未就绪。</translation>
     </message>
     <message>
-        <location line="-11292"/>
+        <location line="-11355"/>
         <source>%1 CLI detected; sign-in state is checked only after approval.</source>
         <comment>subscription.cli-detected</comment>
         <translation>已检测到 %1 CLI；仅在批准后检查登录状态。</translation>
@@ -3078,17 +3080,17 @@ Device code: %1</source>
         <translation>连接名称仅用于显示。qrenderdoc 会自动创建内部稳定标识符。在此启用的模型会显示在 Bread AI 面板的“发送”按钮旁。第一个连接会自动成为默认连接。使用“获取模型”检查 API，或先点“编辑”，再通过“连接/测试”检查订阅。</translation>
     </message>
     <message>
-        <location line="+553"/>
+        <location line="+585"/>
         <source>This confirmation applies only to the exact non-editable command from the built-in provider catalog. The launched Agent remains limited by the per-turn tools and workflow checks. You may uncheck it to prevent the CLI from running.</source>
         <translation>此确认仅适用于 内置提供商目录中内容完全一致且不可编辑的命令。启动后的 Agent 仍受每轮工具范围和工作流检查的限制。可以取消勾选，以阻止 CLI 运行。</translation>
     </message>
     <message>
-        <location line="+1091"/>
+        <location line="+1099"/>
         <source>The built-in official CLI was disabled in Process trust. Check that visible box to allow the exact non-editable catalog command, or cancel.</source>
         <translation>内置官方 CLI 已在“进程信任”中被禁用。请勾选该处可见的复选框，以允许执行内容完全一致且不可编辑的目录命令；否则请取消。</translation>
     </message>
     <message>
-        <location line="+271"/>
+        <location line="+294"/>
         <source>Remove &apos;%1&apos;? Bread AI will forget its saved API credential, session-only credential, and connection-scoped vendor state. A vendor account sign-in stored by the provider or operating system may remain.</source>
         <translation>移除“%1”？Bread AI 将清除其保存的 API 凭据、仅会话凭据以及连接范围内的提供商状态。由提供商或操作系统存储的提供商账号登录状态可能仍会保留。</translation>
     </message>
@@ -3471,12 +3473,12 @@ Additional direction from the user (re-plan and continue from the preserved cont
         <translation>[后续推理内容见智能体监视器]</translation>
     </message>
     <message>
-        <location line="-8223"/>
+        <location line="-8286"/>
         <source>The artifact no longer exists: %1</source>
         <translation>产物已不存在：%1</translation>
     </message>
     <message>
-        <location line="+8246"/>
+        <location line="+8309"/>
         <location line="+19"/>
         <source>Tool: %1</source>
         <translation>工具：%1</translation>
@@ -4125,7 +4127,7 @@ Additional direction from the user (re-plan and continue from the preserved cont
         <translation>读取脚本随 Bread AI 一起提供；你选择的解释器只需要安装 UnityPy 包（pip install UnityPy）。</translation>
     </message>
     <message>
-        <location line="-11595"/>
+        <location line="-11658"/>
         <location line="+110"/>
         <source>Claude sign-in</source>
         <translation>Claude 登录状态</translation>
@@ -4238,6 +4240,66 @@ Additional direction from the user (re-plan and continue from the preserved cont
         <source>This texture is not bound to an input or output at the linked event.</source>
         <translation>链接对应的事件未将此纹理绑定为输入或输出。</translation>
     </message>
+    <message>
+        <location line="+2021"/>
+        <source>Minimal</source>
+        <translation>最低</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Low</source>
+        <translation>低</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Medium</source>
+        <translation>中</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>High</source>
+        <translation>高</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Extra high</source>
+        <translation>极高</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Sent only when the selected model API supports reasoning effort. Leave this at Provider default for endpoints that do not support it.</source>
+        <translation>仅当所选模型 API 支持推理强度时才会发送。对于不支持此参数的端点，请保留“提供商默认值”。</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Optional upper limit for generated tokens in each request. The provider may apply a lower model limit.</source>
+        <translation>每次请求生成内容的可选 Token 上限。服务商可能会对模型应用更低的上限。</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Automatic</source>
+        <translation>自动</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Overrides the context window detected from model metadata. Enter the value published by your provider, or leave this at Automatic.</source>
+        <translation>覆盖从模型元数据检测到的上下文窗口。请输入服务商公布的值，或保留“自动”。</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Reasoning effort</source>
+        <translation>推理强度</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Maximum output tokens</source>
+        <translation>最大输出 Token 数</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Context window (tokens)</source>
+        <translation>上下文窗口（Token 数）</translation>
+    </message>
 </context>
 <context>
     <name>AIConfiguration</name>
@@ -4277,7 +4339,7 @@ Additional direction from the user (re-plan and continue from the preserved cont
         <translation>AI 配置文件正在更新或无法写入。请重试保存连接。</translation>
     </message>
     <message>
-        <location line="+196"/>
+        <location line="+238"/>
         <source>The AI configuration could not be saved. Your existing file has been preserved.</source>
         <translation>无法保存 AI 配置。现有文件已保留。</translation>
     </message>

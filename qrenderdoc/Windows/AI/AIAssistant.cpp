@@ -9551,7 +9551,7 @@ QWidget *AIAssistant::CreateSettingsPage(QWidget *parent)
 
         QDialog dialog(page);
         dialog.setWindowTitle(editing ? tr("Edit AI Connection") : tr("Add AI Connection"));
-        dialog.resize(680, 650);
+        dialog.resize(680, 740);
         QVBoxLayout *dialogRoot = new QVBoxLayout(&dialog);
         QFormLayout *general = new QFormLayout();
         QLineEdit *name = new QLineEdit(&dialog);
@@ -9690,6 +9690,37 @@ QWidget *AIAssistant::CreateSettingsPage(QWidget *parent)
         QComboBox *defaultModel = new QComboBox(modelsBox);
         defaultModelForm->addRow(tr("Default model"), defaultModel);
         modelsRoot->addLayout(defaultModelForm);
+        QWidget *modelOptionsWidget = new QWidget(modelsBox);
+        QFormLayout *modelOptionsForm = new QFormLayout(modelOptionsWidget);
+        modelOptionsForm->setContentsMargins(0, 0, 0, 0);
+        QComboBox *reasoningEffort = new QComboBox(modelOptionsWidget);
+        reasoningEffort->addItem(tr("Provider default"), QString());
+        reasoningEffort->addItem(tr("Minimal"), lit("minimal")); // i18n-ignore: Provider API parameter value.
+        reasoningEffort->addItem(tr("Low"), lit("low")); // i18n-ignore: Provider API parameter value.
+        reasoningEffort->addItem(tr("Medium"), lit("medium")); // i18n-ignore: Provider API parameter value.
+        reasoningEffort->addItem(tr("High"), lit("high")); // i18n-ignore: Provider API parameter value.
+        reasoningEffort->addItem(tr("Extra high"), lit("xhigh")); // i18n-ignore: Provider API parameter value.
+        reasoningEffort->setToolTip(
+            tr("Sent only when the selected model API supports reasoning effort. Leave this at "
+               "Provider default for endpoints that do not support it."));
+        QSpinBox *maxOutputTokens = new QSpinBox(modelOptionsWidget);
+        maxOutputTokens->setRange(0, 1000000);
+        maxOutputTokens->setSingleStep(1024);
+        maxOutputTokens->setSpecialValueText(tr("Provider default"));
+        maxOutputTokens->setToolTip(
+            tr("Optional upper limit for generated tokens in each request. The provider may "
+               "apply a lower model limit."));
+        QSpinBox *contextWindowTokens = new QSpinBox(modelOptionsWidget);
+        contextWindowTokens->setRange(0, 4000000);
+        contextWindowTokens->setSingleStep(4096);
+        contextWindowTokens->setSpecialValueText(tr("Automatic"));
+        contextWindowTokens->setToolTip(
+            tr("Overrides the context window detected from model metadata. Enter the value "
+               "published by your provider, or leave this at Automatic."));
+        modelOptionsForm->addRow(tr("Reasoning effort"), reasoningEffort);
+        modelOptionsForm->addRow(tr("Maximum output tokens"), maxOutputTokens);
+        modelOptionsForm->addRow(tr("Context window (tokens)"), contextWindowTokens);
+        modelsRoot->addWidget(modelOptionsWidget);
         dialogRoot->addWidget(modelsBox, 1);
 
         QDialogButtonBox *buttons =
@@ -9725,6 +9756,7 @@ QWidget *AIAssistant::CreateSettingsPage(QWidget *parent)
           if(selected >= 0)
             combo->setCurrentIndex(selected);
           modePages->setCurrentIndex(kind == lit("model") ? 0 : 1);
+          modelOptionsWidget->setVisible(kind == lit("model")); // i18n-ignore: provider kind identifier used for control flow.
         };
         auto selectedPresetId = [&]() {
           return mode->currentData().toString() == lit("model")
@@ -10985,6 +11017,9 @@ QWidget *AIAssistant::CreateSettingsPage(QWidget *parent)
           const QSignalBlocker commandBlocker(agentCommand);
           const QSignalBlocker modelsBlocker(models);
           const QSignalBlocker authFlowBlocker(authFlow);
+          const QSignalBlocker reasoningEffortBlocker(reasoningEffort);
+          const QSignalBlocker maxOutputTokensBlocker(maxOutputTokens);
+          const QSignalBlocker contextWindowTokensBlocker(contextWindowTokens);
 
           name->setText(connectionDisplayName(existing));
           QString kind = existing.value(lit("kind")).toString();
@@ -11014,6 +11049,11 @@ QWidget *AIAssistant::CreateSettingsPage(QWidget *parent)
           azureVersion->setText(options.value(lit("api_version")).toString());
           vertexProject->setText(options.value(lit("project")).toString());
           vertexLocation->setText(options.value(lit("location")).toString());
+          const int effortIndex =
+              reasoningEffort->findData(options.value(lit("reasoning_effort")).toString()); // i18n-ignore: provider option JSON key.
+          reasoningEffort->setCurrentIndex(effortIndex >= 0 ? effortIndex : 0);
+          maxOutputTokens->setValue(options.value(lit("max_output_tokens")).toInt()); // i18n-ignore: provider option JSON key.
+          contextWindowTokens->setValue(options.value(lit("context_window_tokens")).toInt()); // i18n-ignore: provider option JSON key.
 
           QStringList commandLines;
           for(const QJsonValue &part : existing.value(lit("command")).toArray())
@@ -11155,6 +11195,29 @@ QWidget *AIAssistant::CreateSettingsPage(QWidget *parent)
               if(!vertexLocation->text().trimmed().isEmpty())
                 arguments << lit("--option")
                           << (lit("location=") + vertexLocation->text().trimmed());
+            }
+            // i18n-ignore: Fixed AI profile CLI option and profile field identifiers.
+            arguments << lit("--clear-option") << lit("reasoning_effort") // i18n-ignore: Fixed profile CLI option and JSON field names.
+                      << lit("--clear-option") << lit("max_output_tokens") // i18n-ignore: Fixed profile CLI option and JSON field names.
+                      << lit("--clear-option") << lit("context_window_tokens"); // i18n-ignore: Fixed profile CLI option and JSON field names.
+            const QString effort = reasoningEffort->currentData().toString();
+            if(!effort.isEmpty())
+            {
+              // i18n-ignore: Provider API option name and value, not UI prose.
+              arguments << lit("--option") << (lit("reasoning_effort=") + effort);
+            }
+            if(maxOutputTokens->value() > 0)
+            {
+              // i18n-ignore: Provider API option name, not UI prose.
+              arguments << lit("--option")
+                        << (lit("max_output_tokens=") + QString::number(maxOutputTokens->value())); // i18n-ignore: Provider API option identifier.
+            }
+            if(contextWindowTokens->value() > 0)
+            {
+              // i18n-ignore: Local context-window option name, not UI prose.
+              arguments << lit("--option")
+                        << (lit("context_window_tokens=") + // i18n-ignore: Local context option identifier.
+                            QString::number(contextWindowTokens->value()));
             }
           }
           else

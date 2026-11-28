@@ -680,21 +680,63 @@ AIConfiguration::Reply AIConfiguration::execute(const QStringList &arguments, co
           }
           row[QStringLiteral("command")] = command.array();
         }
+        else if(flag == QStringLiteral("--clear-option"))
+        {
+          if(!QStringList({QStringLiteral("reasoning_effort"),
+                           QStringLiteral("max_output_tokens"),
+                           QStringLiteral("context_window_tokens")})
+                  .contains(value))
+          {
+            reply.diagnostic = invalidSettings(QStringLiteral("options"));
+            return reply;
+          }
+          options.remove(value);
+        }
         else if(flag == QStringLiteral("--option"))
         {
           const QString key = value.section(QLatin1Char('='), 0, 0);
           const QString setting = value.mid(key.size() + 1);
           if(!QStringList({QStringLiteral("api_version"), QStringLiteral("project"),
                            QStringLiteral("location"), QStringLiteral("subscription_auth_flow"),
-                           QStringLiteral("allow_unsandboxed_agent")})
+                           QStringLiteral("allow_unsandboxed_agent"),
+                           QStringLiteral("reasoning_effort"),
+                           QStringLiteral("max_output_tokens"),
+                           QStringLiteral("context_window_tokens")})
                   .contains(key))
           {
             reply.diagnostic = invalidSettings(QStringLiteral("options"));
             return reply;
           }
-          options[key] = key == QStringLiteral("allow_unsandboxed_agent")
-                             ? QJsonValue(setting == QStringLiteral("true"))
-                             : QJsonValue(setting);
+          if(key == QStringLiteral("allow_unsandboxed_agent"))
+            options[key] = QJsonValue(setting == QStringLiteral("true"));
+          else if(key == QStringLiteral("max_output_tokens") ||
+                  key == QStringLiteral("context_window_tokens"))
+          {
+            bool validInteger = false;
+            const int tokens = setting.toInt(&validInteger);
+            const int minimum = key == QStringLiteral("max_output_tokens") ? 1 : 4096;
+            const int maximum = key == QStringLiteral("max_output_tokens") ? 1000000 : 4000000;
+            if(!validInteger || tokens < minimum || tokens > maximum)
+            {
+              reply.diagnostic = invalidSettings(QStringLiteral("options"));
+              return reply;
+            }
+            options[key] = tokens;
+          }
+          else if(key == QStringLiteral("reasoning_effort"))
+          {
+            if(!QStringList({QStringLiteral("minimal"), QStringLiteral("low"),
+                             QStringLiteral("medium"), QStringLiteral("high"),
+                             QStringLiteral("xhigh")})
+                    .contains(setting))
+            {
+              reply.diagnostic = invalidSettings(QStringLiteral("options"));
+              return reply;
+            }
+            options[key] = setting;
+          }
+          else
+            options[key] = setting;
         }
         else
         {
